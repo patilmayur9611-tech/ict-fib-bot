@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: ict-judas-trading-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: MODE
+        value: PAPER_TRADING
+      - key: EXCHANGE
+        value: binance
+      - key: USE_TESTNET
+        value: "true"
+      - key: INITIAL_CAPITAL
+        value: "2000.0"
+      - key: MAX_CAPITAL_CAP
+        value: "100000.0"
+      - key: LEVERAGE
+        value: "20"
+      - key: TELEGRAM_BOT_TOKEN
+        value: "8792852123:AAENvIX0o_4ETvLsT-Xy3wj-Gq-fokMxhF8"
+      - key: TELEGRAM_CHAT_ID
+        value: "7271911207"
+      - key: API_KEY
+        sync: false
+      - key: API_SECRET
+        sync: false
