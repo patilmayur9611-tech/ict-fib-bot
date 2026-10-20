@@ -18,6 +18,12 @@ client = DeltaClient()
 strategy = StrategyEngine(client)
 
 class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        """Responds to UptimeRobot HEAD ping with 200 OK to keep service alive."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+
     def do_GET(self):
         state = client.state
         trades = state.get("closed_trades", [])
