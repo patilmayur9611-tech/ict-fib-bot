@@ -1,7 +1,8 @@
 """
 ========================================================================================
-ICT ASIAN JUDAS SWING & OTE MASTER BOT - MAIN RUNNER
+ICT ASIAN JUDAS SWING & OTE MASTER BOT - MAIN RUNNER (INR EDITION)
 Delta Exchange India (api.india.delta.exchange)
+Currency: Indian Rupee (INR - ₹)
 Time strictly locked to Indian Standard Time (IST, UTC+5:30)
 ========================================================================================
 """
@@ -27,18 +28,21 @@ class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         state = client.state
         trades = state.get("closed_trades", [])
-        wins = sum(1 for t in trades if t.get("final_pnl", 0) > 0)
-        losses = sum(1 for t in trades if t.get("final_pnl", 0) < 0)
+        wins = sum(1 for t in trades if t.get("final_pnl_inr", 0) > 0)
+        losses = sum(1 for t in trades if t.get("final_pnl_inr", 0) < 0)
         total = len(trades)
         win_rate = (wins / total * 100) if total > 0 else 0.0
 
         now_ist_str = config.get_now_ist().strftime('%Y-%m-%d %I:%M:%S %p')
+        active_cap = state.get("active_capital_inr", config.INITIAL_CAPITAL_INR)
+        banked = state.get("banked_profit_inr", 0.0)
+        net_pnl = state.get("total_net_pnl_inr", 0.0)
 
         html = f"""
         <!DOCTYPE html>
         <html>
         <head>
-            <title>ICT Asian Judas OTE Master Bot</title>
+            <title>ICT Asian Judas OTE Master Bot (INR)</title>
             <meta http-equiv="refresh" content="30">
             <style>
                 body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 20px; }}
@@ -64,9 +68,10 @@ class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
         <body>
             <div class="container">
                 <div class="header">
-                    <h2>🎯 ICT Asian Judas OTE Master Bot</h2>
+                    <h2>🎯 ICT Asian Judas OTE Master Bot (Delta India)</h2>
                     <div>
                         <span class="badge badge-purple">🇮🇳 IST: {now_ist_str}</span>
+                        <span class="badge badge-green">INR (₹) EDITION</span>
                         <span class="badge badge-orange">{config.LEVERAGE}x LEVERAGE</span>
                         <span class="badge badge-blue">{'PAPER TRADING' if config.PAPER_TRADING else 'LIVE TRADING'}</span>
                     </div>
@@ -74,16 +79,16 @@ class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
 
                 <div class="grid">
                     <div class="card">
-                        <div class="card-title">Active Capital</div>
-                        <div class="card-val">${state['active_capital']:,.2f}</div>
+                        <div class="card-title">Active INR Capital</div>
+                        <div class="card-val">{config.format_inr(active_cap)}</div>
                     </div>
                     <div class="card">
-                        <div class="card-title">Banked Vault (Cap $100k)</div>
-                        <div class="card-val text-green">${state.get('banked_profit', 0):,.2f}</div>
+                        <div class="card-title">Banked Vault (Cap ₹90L)</div>
+                        <div class="card-val text-green">{config.format_inr(banked)}</div>
                     </div>
                     <div class="card">
                         <div class="card-title">Total Realized PnL</div>
-                        <div class="card-val {'text-green' if state.get('total_net_pnl', 0) >= 0 else 'text-red'}">${state.get('total_net_pnl', 0):+,.2f}</div>
+                        <div class="card-val {'text-green' if net_pnl >= 0 else 'text-red'}">{'+' if net_pnl >= 0 else ''}{config.format_inr(net_pnl)}</div>
                     </div>
                     <div class="card">
                         <div class="card-title">Win Rate</div>
@@ -97,11 +102,11 @@ class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
                         <tr>
                             <th>Coin</th>
                             <th>Side</th>
-                            <th>Entry</th>
+                            <th>Entry (USD / INR)</th>
                             <th>SL</th>
                             <th>Rescue (+1R)</th>
                             <th>Target 1</th>
-                            <th>Margin (20x)</th>
+                            <th>Margin (20x INR)</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -116,11 +121,11 @@ class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
                 <tr>
                     <td><b>{sym}</b></td>
                     <td class="{side_cls}">{p['side']}</td>
-                    <td>${p['entry_price']:.4f}</td>
+                    <td>${p['entry_price']:.4f} <small style='color:#8b949e'>(~₹{p.get('entry_inr_est', 0):,.2f})</small></td>
                     <td>${p['sl_price']:.4f}</td>
                     <td>${p['rescue_tp']:.4f}</td>
                     <td>${p['tp1_price']:.4f}</td>
-                    <td>${p['margin_used']:.2f}</td>
+                    <td>{config.format_inr(p.get('margin_used_inr', 0))}</td>
                 </tr>
                 """
 
@@ -154,11 +159,15 @@ def run_telegram_poller():
 
 def main():
     now_ist_str = config.get_now_ist().strftime('%Y-%m-%d %I:%M:%S %p')
+    active_cap = client.state.get('active_capital_inr', config.INITIAL_CAPITAL_INR)
+    banked = client.state.get('banked_profit_inr', 0.0)
+
     print("=" * 90)
-    print("🎯 ICT ASIAN JUDAS SWING & OTE MASTER BOT (DELTA EXCHANGE INDIA)")
+    print("🎯 ICT ASIAN JUDAS SWING & OTE MASTER BOT - DELTA EXCHANGE INDIA (INR EDITION)")
     print(f"   Mode: {'🟢 PAPER TRADING (Safe Simulation)' if config.PAPER_TRADING else '🔥 REAL TRADING'}")
     print(f"   Clock: {now_ist_str} IST (Locked UTC+5:30)")
-    print(f"   Active Capital: ${client.state['active_capital']:.2f} | Banked Vault: ${client.state.get('banked_profit', 0):.2f}")
+    print(f"   Currency: Indian Rupee (INR - ₹)")
+    print(f"   Active Capital: {config.format_inr(active_cap)} | Banked Vault: {config.format_inr(banked)}")
     print(f"   Leverage: {config.LEVERAGE}x | Risk Per Trade: {config.RISK_PER_TRADE_PCT*100:.1f}%")
     print(f"   Top 5 Coins: {', '.join(config.SYMBOLS)}")
     print(f"   Sessions (IST): Asian (05:30-12:30), London (12:30-16:30), NY (17:30-22:30)")
@@ -174,10 +183,11 @@ def main():
 
     # Startup Notification to Telegram
     telegram_notifier.send_alert(
-        f"🚀 *[ICT SNIPER BOT STARTED]*\n"
+        f"🚀 *[ICT SNIPER BOT STARTED - INR EDITION]*\n"
         f"═══════════════════════\n"
         f"🇮🇳 *Clock:* `{now_ist_str}` IST\n"
-        f"💼 *Starting Capital:* `${client.state['active_capital']:.2f}`\n"
+        f"🇮🇳 *Currency:* `Indian Rupee (INR - ₹)`\n"
+        f"💼 *Starting Capital:* `{config.format_inr(active_cap)}`\n"
         f"⚡ *Leverage:* {config.LEVERAGE}x Isolated\n"
         f"🪙 *Top 5 Coins:* `{', '.join(config.SYMBOLS)}`\n"
         f"🛡️ *Rescued Risk Management:* ACTIVE (+1.0R / BE Lock)\n"

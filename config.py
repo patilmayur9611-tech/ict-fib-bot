@@ -1,7 +1,9 @@
 """
 ========================================================================================
-ICT ASIAN JUDAS SWING & OTE MASTER BOT - CONFIGURATION
+ICT ASIAN JUDAS SWING & OTE MASTER BOT - CONFIGURATION (INR EDITION)
 Exchange: Delta Exchange India (api.india.delta.exchange)
+Currency: Indian Rupee (INR - ₹)
+Clock: Strictly Locked to Indian Standard Time (IST, UTC+5:30)
 ========================================================================================
 """
 import os
@@ -43,14 +45,20 @@ DELTA_BASE_URL = "https://api.india.delta.exchange"
 DELTA_WS_URL = "wss://socket.india.delta.exchange"
 
 # ========================================================================================
-# 5. CAPITAL SCALING ENGINE & 20X LEVERAGE ($2,000 START -> $100,000 CAP)
+# 5. INDIAN RUPEE (INR - ₹) CAPITAL MANAGEMENT & 20X LEVERAGE
+# Delta Exchange India runs deposits, withdrawals, margin, and balances in INR (₹)
 # ========================================================================================
-INITIAL_CAPITAL = 2000.0         # Starting capital ($2,000.00)
-MAX_ACTIVE_CAPITAL = 100000.0    # Maximum active risk cap ($100,000.00)
-RISK_PER_TRADE_PCT = 0.02        # Strictly 2.0% risk per trade
+USD_INR_RATE = float(os.getenv("USD_INR_RATE", "90.0"))        # Conversion peg (~₹90 / USD)
+INITIAL_CAPITAL_INR = float(os.getenv("INITIAL_CAPITAL_INR", "2000.0"))    # ₹2,000 Starting Capital
+MAX_ACTIVE_CAPITAL_INR = float(os.getenv("MAX_ACTIVE_CAPITAL_INR", "100000.0")) # ₹1,00,000 Active Risk Ceiling (Cap)
+RISK_PER_TRADE_PCT = 0.025        # 2.5% risk per trade (e.g. ₹50 risk on ₹2,000 capital)
 LEVERAGE = 20                    # 20x Leverage (Isolated Margin)
-MAX_CONCURRENT_TRADES = 4        # Maximum simultaneous open trades
-MAX_POSITION_USD = 50000.0       # Position size safety cap
+MAX_CONCURRENT_TRADES = 3        # Maximum simultaneous open trades
+MAX_POSITION_INR = 40000.0       # ₹40,000 Position size cap (20x on ₹2,000)
+
+def format_inr(amount):
+    """Formats currency into Indian Rupee format."""
+    return f"₹{amount:,.2f}"
 
 # ========================================================================================
 # 6. ASSET UNIVERSE: TOP 5 LEADERBOARD COINS (85.2% WIN RATE ON DELTA INDIA)

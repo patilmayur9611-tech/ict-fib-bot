@@ -1,10 +1,10 @@
 {
-    "initial_capital": 2000.0,
-    "active_capital": 2000.0,
-    "month_starting_capital": 2000.0,
+    "initial_capital_inr": 2000.0,
+    "active_capital_inr": 2000.0,
+    "month_starting_capital_inr": 2000.0,
     "current_month": "2026-10",
-    "banked_profit": 0.0,
-    "total_net_pnl": 0.0,
+    "banked_profit_inr": 0.0,
+    "total_net_pnl_inr": 0.0,
     "open_positions": {},
     "closed_trades": []
 }
