@@ -3,6 +3,7 @@
 DELTA EXCHANGE INDIA CLIENT & COMPOUNDING PORTFOLIO MANAGER (INR EDITION)
 Exchange: Delta Exchange India (api.india.delta.exchange)
 Currency: Indian Rupee (INR - ₹)
+Integer Contract Rounding: Guaranteed Zero Rejection on Partial / Full Exits
 Time strictly locked to Indian Standard Time (IST, UTC+5:30)
 ========================================================================================
 """
@@ -116,7 +117,7 @@ class DeltaClient:
     def get_current_risk_inr(self):
         """
         Compounding Engine with Max Active Capital ceiling in INR:
-        - Risk per trade is strictly 2.0% of active INR capital.
+        - Risk per trade is strictly 2.5% of active INR capital.
         - Surplus profits beyond MAX_ACTIVE_CAPITAL_INR are safely banked into the vault.
         """
         now_month = config.get_now_ist().strftime('%Y-%m')
@@ -137,9 +138,33 @@ class DeltaClient:
         curr_cap = self.state.get("active_capital_inr", config.INITIAL_CAPITAL_INR)
         return curr_cap * config.RISK_PER_TRADE_PCT
 
+    def calculate_integer_exit_contracts(self, total_contracts):
+        """
+        INTEGER CONTRACT ROUNDING ENGINE FOR DELTA EXCHANGE INDIA:
+        Guarantees that 30% / 40% / 30% partial exits are strictly whole integer lots.
+        Prevents Delta Exchange API rejection: 'contract_size must be an integer'.
+        Sum of exit_1 + exit_2 + exit_3 ALWAYS equals total_contracts exactly!
+        """
+        if total_contracts >= 3:
+            exit_1 = max(1, int(round(total_contracts * 0.30)))
+            exit_2 = max(1, int(round(total_contracts * 0.40)))
+            exit_3 = total_contracts - exit_1 - exit_2
+            if exit_3 < 0:
+                exit_2 += exit_3
+                exit_3 = 0
+        elif total_contracts == 2:
+            exit_1 = 1  # 50%
+            exit_2 = 1  # 50%
+            exit_3 = 0
+        else: # total_contracts == 1
+            exit_1 = 0  # Locks Breakeven SL, exits 1 full contract at TP1
+            exit_2 = 1
+            exit_3 = 0
+        return int(exit_1), int(exit_2), int(exit_3)
+
     def open_position(self, setup):
         """
-        Opens a new trade position using 20x Leverage and Rescued Risk Management in INR.
+        Opens a new trade position using 20x Leverage and Integer Contract Rounding.
         """
         symbol = setup["symbol"]
         side = setup["side"]
@@ -157,13 +182,24 @@ class DeltaClient:
         if sl_pct <= 0:
             return None
 
-        # Position value calculation in INR
-        raw_position_inr = risk_inr / sl_pct
-        position_inr = min(raw_position_inr, config.MAX_POSITION_INR)
-        margin_used_inr = position_inr / config.LEVERAGE
+        # Integer contract sizing for Delta Exchange India
+        contract_mult = getattr(config, 'CONTRACT_VALUES', {}).get(symbol, 1.0)
+        contract_unit_usd = entry_price * contract_mult
 
-        # Equivalent USD sizes for Delta contract logic
-        position_usd = position_inr / config.USD_INR_RATE
+        raw_position_inr = risk_inr / sl_pct
+        capped_position_inr = min(raw_position_inr, config.MAX_POSITION_INR)
+        capped_position_usd = capped_position_inr / config.USD_INR_RATE
+
+        # Calculate exact integer contracts
+        raw_contracts = capped_position_usd / contract_unit_usd
+        total_contracts = max(1, int(round(raw_contracts)))
+
+        # Calculate exact integer contract exits (30% / 40% / 30%)
+        exit_1_contracts, exit_2_contracts, exit_3_contracts = self.calculate_integer_exit_contracts(total_contracts)
+
+        actual_position_usd = total_contracts * contract_unit_usd
+        actual_position_inr = actual_position_usd * config.USD_INR_RATE
+        margin_used_inr = actual_position_inr / config.LEVERAGE
         entry_inr_est = entry_price * config.USD_INR_RATE
 
         now_str = config.get_now_ist().strftime('%Y-%m-%d %H:%M:%S')
@@ -181,9 +217,14 @@ class DeltaClient:
             "tp2_price": tp2_price,
             "sl_pct": sl_pct * 100,
             "risk_inr": risk_inr,
-            "position_inr": position_inr,
-            "position_usd": position_usd,
-            "remaining_ratio": 1.0,  # 100% open initially
+            "position_inr": actual_position_inr,
+            "position_usd": actual_position_usd,
+            "total_contracts": total_contracts,
+            "remaining_contracts": total_contracts,
+            "exit_1_contracts": exit_1_contracts,
+            "exit_2_contracts": exit_2_contracts,
+            "exit_3_contracts": exit_3_contracts,
+            "remaining_ratio": 1.0,
             "margin_used_inr": margin_used_inr,
             "rescue_hit": False,
             "tp1_hit": False,
@@ -194,16 +235,16 @@ class DeltaClient:
         self.state["open_positions"][symbol] = trade
         self.save_state()
         telegram_notifier.notify_entry(trade)
-        print(f"🟢 [NEW TRADE OPENED] {symbol} {side} @ ${entry_price:.4f} (~₹{entry_inr_est:,.2f}) | Risk: {config.format_inr(risk_inr)} | 20x Margin: {config.format_inr(margin_used_inr)}")
+        print(f"🟢 [NEW TRADE OPENED] {symbol} {side} @ ${entry_price:.4f} (~₹{entry_inr_est:,.2f}) | Contracts: {total_contracts} [L1:{exit_1_contracts}, L2:{exit_2_contracts}, L3:{exit_3_contracts}] | Margin: {config.format_inr(margin_used_inr)}")
         return trade
 
     def manage_positions(self):
         """
-        Monitors active positions against live prices in INR:
-        1. Checks Level 1 Rescued TP (+1.0R / Asian Mid): Books 30% profit in INR & locks SL to Breakeven!
-        2. Checks Level 2 TP1 (Asian High/Low): Books 40% profit in INR & locks trailing SL!
-        3. Checks Level 3 TP2 Runner (3.0R): Books final 30% profit in INR!
-        4. Checks Stop Loss execution.
+        Monitors active positions with Integer Contract Partial Exits:
+        1. Level 1 (+1.0R / Asian Mid): Closes exit_1_contracts & locks SL to Breakeven!
+        2. Level 2 TP1 (Asian High/Low): Closes exit_2_contracts & locks trailing SL!
+        3. Level 3 TP2 Runner (3.0R): Closes all remaining contracts!
+        4. Stop Loss execution.
         """
         if not self.state["open_positions"]:
             return
@@ -220,38 +261,50 @@ class DeltaClient:
             entry_price = trade["entry_price"]
             sl_price = trade["sl_price"]
             pos_inr = trade["position_inr"]
+            total_c = max(1, trade.get("total_contracts", 1))
 
             # ---------------------------------------------------------
-            # 1. RESCUED RULE (+1.0R / Asian Mid): 30% Profit in INR & Breakeven Lock
+            # 1. RESCUED RULE (+1.0R / Asian Mid): Integer Contract Exit + Breakeven Lock
             # ---------------------------------------------------------
             if not trade["rescue_hit"]:
                 hit_rescue = (current_price >= trade["rescue_tp"]) if side == "LONG" else (current_price <= trade["rescue_tp"])
                 if hit_rescue:
-                    closed_val_inr = pos_inr * config.RESCUE_CLOSE_RATIO
-                    r_dist_pct = abs(trade["rescue_tp"] - entry_price) / entry_price
-                    pnl_rescue_inr = closed_val_inr * r_dist_pct
+                    exit_contracts = trade.get("exit_1_contracts", 0)
 
-                    trade["remaining_ratio"] -= config.RESCUE_CLOSE_RATIO
-                    trade["realized_pnl_inr"] += pnl_rescue_inr
+                    if exit_contracts > 0:
+                        closed_ratio = exit_contracts / total_c
+                        closed_val_inr = pos_inr * closed_ratio
+                        r_dist_pct = abs(trade["rescue_tp"] - entry_price) / entry_price
+                        pnl_rescue_inr = closed_val_inr * r_dist_pct
+
+                        trade["remaining_contracts"] = max(0, trade.get("remaining_contracts", total_c) - exit_contracts)
+                        trade["remaining_ratio"] = trade["remaining_contracts"] / total_c
+                        trade["realized_pnl_inr"] += pnl_rescue_inr
+                        self._apply_realized_pnl_inr(pnl_rescue_inr)
+                    else:
+                        pnl_rescue_inr = 0.0
+
                     trade["rescue_hit"] = True
                     trade["sl_price"] = entry_price  # BREAKEVEN LOCK!
 
-                    self._apply_realized_pnl_inr(pnl_rescue_inr)
                     self.save_state()
                     telegram_notifier.notify_rescue_hit(trade, pnl_rescue_inr)
-                    print(f"🛡️ [RESCUED TRIGGERED] {symbol} booked 30% (+{config.format_inr(pnl_rescue_inr)}) & SL moved to BREAKEVEN!")
+                    print(f"🛡️ [RESCUED TRIGGERED] {symbol} closed {exit_contracts} contract(s) (+{config.format_inr(pnl_rescue_inr)}) & SL moved to BREAKEVEN!")
 
             # ---------------------------------------------------------
-            # 2. TARGET 1 (Asian High/Low): 40% Profit in INR & Trailing SL
+            # 2. TARGET 1 (Asian High/Low): Integer Contract Exit + Trailing SL
             # ---------------------------------------------------------
             if not trade["tp1_hit"] and trade["rescue_hit"]:
                 hit_tp1 = (current_price >= trade["tp1_price"]) if side == "LONG" else (current_price <= trade["tp1_price"])
                 if hit_tp1:
-                    closed_val_inr = pos_inr * config.TP1_CLOSE_RATIO
+                    exit_contracts = trade.get("exit_2_contracts", 0)
+                    closed_ratio = (exit_contracts / total_c) if exit_contracts > 0 else config.TP1_CLOSE_RATIO
+                    closed_val_inr = pos_inr * closed_ratio
                     r_dist_pct = abs(trade["tp1_price"] - entry_price) / entry_price
                     pnl_tp1_inr = closed_val_inr * r_dist_pct
 
-                    trade["remaining_ratio"] -= config.TP1_CLOSE_RATIO
+                    trade["remaining_contracts"] = max(0, trade.get("remaining_contracts", total_c) - exit_contracts)
+                    trade["remaining_ratio"] = trade["remaining_contracts"] / total_c
                     trade["realized_pnl_inr"] += pnl_tp1_inr
                     trade["tp1_hit"] = True
 
@@ -262,17 +315,21 @@ class DeltaClient:
                     self._apply_realized_pnl_inr(pnl_tp1_inr)
                     self.save_state()
                     telegram_notifier.notify_tp1_hit(trade, pnl_tp1_inr, trade["sl_price"])
-                    print(f"💰 [TP1 HIT] {symbol} booked 40% (+{config.format_inr(pnl_tp1_inr)}) & trailing SL locked!")
+                    print(f"💰 [TP1 HIT] {symbol} closed {exit_contracts} contract(s) (+{config.format_inr(pnl_tp1_inr)}) & trailing SL locked!")
 
             # ---------------------------------------------------------
-            # 3. TARGET 2 RUNNER (3.0R Home Run): Final 30% Profit in INR
+            # 3. TARGET 2 RUNNER (3.0R Home Run): Closes ALL Remaining Contracts
             # ---------------------------------------------------------
             hit_tp2 = (current_price >= trade["tp2_price"]) if side == "LONG" else (current_price <= trade["tp2_price"])
             if hit_tp2 and trade["tp1_hit"]:
-                closed_val_inr = pos_inr * trade["remaining_ratio"]
+                rem_c = trade.get("remaining_contracts", 0)
+                closed_ratio = (rem_c / total_c) if rem_c > 0 else trade.get("remaining_ratio", 0.30)
+                closed_val_inr = pos_inr * closed_ratio
                 r_dist_pct = abs(trade["tp2_price"] - entry_price) / entry_price
                 pnl_tp2_inr = closed_val_inr * r_dist_pct
 
+                trade["remaining_contracts"] = 0
+                trade["remaining_ratio"] = 0.0
                 total_trade_pnl_inr = trade["realized_pnl_inr"] + pnl_tp2_inr
                 self._apply_realized_pnl_inr(pnl_tp2_inr)
 
@@ -285,7 +342,9 @@ class DeltaClient:
             # ---------------------------------------------------------
             hit_sl = (current_price <= sl_price) if side == "LONG" else (current_price >= sl_price)
             if hit_sl:
-                remaining_val_inr = pos_inr * trade["remaining_ratio"]
+                rem_c = trade.get("remaining_contracts", 0)
+                closed_ratio = (rem_c / total_c) if rem_c > 0 else trade.get("remaining_ratio", 1.0)
+                remaining_val_inr = pos_inr * closed_ratio
                 loss_dist_pct = abs(sl_price - entry_price) / entry_price
 
                 if sl_price == entry_price:
@@ -295,6 +354,8 @@ class DeltaClient:
                     loss_remaining_inr = -(remaining_val_inr * loss_dist_pct)
                     reason = "STOP_LOSS_EXIT"
 
+                trade["remaining_contracts"] = 0
+                trade["remaining_ratio"] = 0.0
                 total_trade_pnl_inr = trade["realized_pnl_inr"] + loss_remaining_inr
                 self._apply_realized_pnl_inr(loss_remaining_inr)
 

@@ -71,6 +71,15 @@ SYMBOLS = [
     'SOLUSD'     # Solana
 ]
 
+# DELTA EXCHANGE INDIA CONTRACT VALUES (Units per 1 Contract Lot)
+CONTRACT_VALUES = {
+    'DOGEUSD': 100.0,  # 1 Contract = 100 DOGE
+    'ADAUSD': 1.0,     # 1 Contract = 1 ADA
+    'AVAXUSD': 1.0,    # 1 Contract = 1 AVAX
+    'BNBUSD': 0.1,     # 1 Contract = 0.1 BNB
+    'SOLUSD': 1.0      # 1 Contract = 1 SOL
+}
+
 # ========================================================================================
 # 7. ICT SESSIONS & TIMEFRAMES (LOCKED STRICTLY TO IST UTC+5:30)
 # ========================================================================================
