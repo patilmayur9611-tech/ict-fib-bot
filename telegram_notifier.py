@@ -204,6 +204,28 @@ def handle_telegram_updates(client):
                             )
                         send_alert(resp)
 
+                elif cmd == "/reset":
+                    client.state["active_capital_inr"] = 2000.0
+                    client.state["initial_capital_inr"] = 2000.0
+                    client.state["month_starting_capital_inr"] = 2000.0
+                    client.state["banked_profit_inr"] = 0.0
+                    client.state["total_net_pnl_inr"] = 0.0
+                    client.state["open_positions"] = {}
+                    client.state["closed_trades"] = []
+                    client.save_state()
+                    resp = (
+                        f"🔄 *[WALLET RESET COMPLETE]*\n"
+                        f"═══════════════════════\n"
+                        f"💼 *Active Capital:* `₹2,000.00`\n"
+                        f"💵 *Realized PnL:* `₹0.00`\n"
+                        f"🏦 *Banked Safe Vault:* `₹0.00`\n"
+                        f"📊 *Open Positions:* `0 (Cleared)`\n"
+                        f"📈 *Trades Record:* `0 (Fresh Start)`\n"
+                        f"🕒 Time: `{now_ist}` IST\n"
+                        f"✅ Virtual money has been reset to ₹2,000.00 INR successfully!"
+                    )
+                    send_alert(resp)
+
                 elif cmd in ["/start", "/help"]:
                     resp = (
                         f"🤖 *ICT ASIAN JUDAS OTE MASTER BOT (INR EDITION)*\n"
@@ -214,6 +236,7 @@ def handle_telegram_updates(client):
                         f"• `/status` - Check wallet balance (₹), vault, & PnL\n"
                         f"• `/positions` - View current open trades & margins\n"
                         f"• `/balance` - Quick INR balance overview\n"
+                        f"• `/reset` - Reset virtual wallet to ₹2,000.00 INR\n"
                         f"• `/help` - View command list"
                     )
                     send_alert(resp)

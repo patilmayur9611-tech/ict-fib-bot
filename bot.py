@@ -26,6 +26,21 @@ class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        if self.path == "/reset":
+            client.state["active_capital_inr"] = 2000.0
+            client.state["initial_capital_inr"] = 2000.0
+            client.state["month_starting_capital_inr"] = 2000.0
+            client.state["banked_profit_inr"] = 0.0
+            client.state["total_net_pnl_inr"] = 0.0
+            client.state["open_positions"] = {}
+            client.state["closed_trades"] = []
+            client.save_state()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"<html><body style='background:#0d1117;color:#c9d1d9;font-family:sans-serif;padding:40px;text-align:center;'><h2>&#9989; Virtual Capital Reset to Rs 2,000 INR Successfully!</h2><p><a href='/' style='color:#58a6ff;'>Back to Dashboard</a></p></body></html>")
+            return
+
         state = client.state
         trades = state.get("closed_trades", [])
         wins = sum(1 for t in trades if t.get("final_pnl_inr", 0) > 0)
@@ -74,6 +89,7 @@ class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
                         <span class="badge badge-green">INR (₹) EDITION</span>
                         <span class="badge badge-orange">{config.LEVERAGE}x LEVERAGE</span>
                         <span class="badge badge-blue">{'PAPER TRADING' if config.PAPER_TRADING else 'LIVE TRADING'}</span>
+                        <a href="/reset" style="background:#238636;color:white;padding:4px 8px;text-decoration:none;border-radius:4px;font-size:12px;font-weight:bold;margin-left:5px;" onclick="return confirm('Reset virtual balance to Rs 2,000 INR?');">&#128260; RESET TO &#8377;2,000</a>
                     </div>
                 </div>
 
