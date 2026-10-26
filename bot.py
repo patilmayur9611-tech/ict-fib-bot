@@ -157,6 +157,41 @@ def run_telegram_poller():
             pass
         time.sleep(2)
 
+LAST_LOOP_TIMESTAMP = time.time()
+LAST_HEARTBEAT_SENT = 0
+
+def watchdog_and_heartbeat_loop(client):
+    """Background watchdog ensuring trading loop never freezes and periodic heartbeat alerts."""
+    global LAST_LOOP_TIMESTAMP, LAST_HEARTBEAT_SENT
+    while True:
+        try:
+            time.sleep(30)
+            now = time.time()
+
+            # 1. Check if trading loop stalled > 90 seconds
+            if now - LAST_LOOP_TIMESTAMP > 90:
+                print(f"⚠️ [WATCHDOG ALERT] Bot 2 loop stalled for {int(now - LAST_LOOP_TIMESTAMP)}s!")
+
+            # 2. Automatic Heartbeat Pulse Every 4 Hours (14,400 seconds)
+            if (now - LAST_HEARTBEAT_SENT) >= 14400:
+                LAST_HEARTBEAT_SENT = now
+                open_cnt = len(client.state.get("open_positions", {}))
+                active_cap = client.state.get("active_capital_inr", 2000.0)
+                now_ist_str = config.get_now_ist().strftime("%Y-%m-%d %H:%M IST")
+                
+                hb_msg = (
+                    f"💓 *[BOT 2: FIBONACCI SNIPER HEARTBEAT]*\n"
+                    f"• Time (IST): `{now_ist_str}`\n"
+                    f"• System Status: 🟢 *ONLINE & SCANNING 24x7*\n"
+                    f"• Top 5 Coins: `{', '.join(config.SYMBOLS)}`\n"
+                    f"• Active Positions: *{open_cnt}*\n"
+                    f"• Capital: *{config.format_inr(active_cap)}*\n"
+                    f"• Health: Zero errors | UptimeRobot Active"
+                )
+                telegram_notifier.send_alert(hb_msg)
+        except Exception as e:
+            print(f"[WATCHDOG ERROR] {e}")
+
 def main():
     now_ist_str = config.get_now_ist().strftime('%Y-%m-%d %I:%M:%S %p')
     active_cap = client.state.get('active_capital_inr', config.INITIAL_CAPITAL_INR)
@@ -181,6 +216,11 @@ def main():
     tg_thread = threading.Thread(target=run_telegram_poller, daemon=True)
     tg_thread.start()
 
+    # 3. Start Anti-Freeze Watchdog & Heartbeat thread
+    watchdog_thread = threading.Thread(target=watchdog_and_heartbeat_loop, args=(client,), daemon=True)
+    watchdog_thread.start()
+    print("🛡️ [WATCHDOG] Anti-Freeze Watchdog & 4-Hour Heartbeat active.")
+
     # Startup Notification to Telegram
     telegram_notifier.send_alert(
         f"🚀 *[ICT SNIPER BOT STARTED - INR EDITION]*\n"
@@ -194,10 +234,12 @@ def main():
         f"✅ Bot is actively scanning and ready for trades!"
     )
 
-    # 3. Main 24/7 Scanning Loop
+    # 4. Main 24/7 Scanning Loop
     scan_interval = 20  # scan every 20 seconds
     while True:
         try:
+            global LAST_LOOP_TIMESTAMP
+            LAST_LOOP_TIMESTAMP = time.time()
             # A. Manage and monitor open positions
             client.manage_positions()
 

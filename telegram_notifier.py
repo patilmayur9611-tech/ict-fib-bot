@@ -18,7 +18,7 @@ TELEGRAM_OFFSET = 0
 BOT_ACTIVE = True
 
 def send_alert(message):
-    """Sends markdown formatted message to Telegram."""
+    """Sends markdown formatted message to Telegram with automatic plain-text fallback."""
     if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
         return None
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -31,11 +31,24 @@ def send_alert(message):
     data = json.dumps(payload).encode('utf-8')
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=12) as r:
             return json.loads(r.read().decode())
     except Exception as e:
-        print(f"[TELEGRAM ERROR] Failed to send message: {e}")
-        return None
+        # BULLETPROOF FALLBACK: Send as Plain Text
+        try:
+            plain_text = message.replace('*', '').replace('_', '').replace('`', '').replace('~', '')
+            payload_plain = {
+                "chat_id": config.TELEGRAM_CHAT_ID,
+                "text": plain_text,
+                "disable_web_page_preview": True
+            }
+            req2 = urllib.request.Request(url, data=json.dumps(payload_plain).encode('utf-8'), headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req2, timeout=12) as r2:
+                print(f"[TELEGRAM RECOVERED] Delivered alert via fallback plain text.")
+                return json.loads(r2.read().decode())
+        except Exception as e2:
+            print(f"[TELEGRAM ERROR] Failed to send message: {e} | Fallback Error: {e2}")
+            return None
 
 def notify_entry(trade):
     """Sends entry alert with full ICT parameters formatted in INR (₹)."""
