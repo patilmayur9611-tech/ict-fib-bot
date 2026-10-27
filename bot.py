@@ -322,19 +322,6 @@ def main():
             print(f"❌ [LOOP ERROR]: {e}")
 
         time.sleep(scan_interval)
-                    if len(candles) < 25:
-                        continue
-
-                    setup = strategy.analyze_symbol(symbol, candles)
-                    if setup:
-                        client.open_position(setup)
-                        if len(client.state.get("open_positions", {})) >= config.MAX_CONCURRENT_TRADES:
-                            break
-
-        except Exception as e:
-            print(f"❌ [LOOP ERROR]: {e}")
-
-        time.sleep(scan_interval)
 
 if __name__ == "__main__":
     main()
