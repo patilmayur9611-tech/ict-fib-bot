@@ -173,6 +173,8 @@ def handle_telegram_updates(client):
                     banked = state.get("banked_profit_inr", 0.0)
                     net_pnl = state.get("total_net_pnl_inr", 0.0)
                     pnl_sign = "+" if net_pnl >= 0 else "-"
+                    active_coins = getattr(client, 'active_universe', config.SYMBOLS)
+                    top_preview = ', '.join(active_coins[:8]) + ('...' if len(active_coins) > 8 else '')
 
                     resp = (
                         f"📊 *[DELTA INDIA WALLET & BOT STATUS]*\n"
@@ -184,14 +186,16 @@ def handle_telegram_updates(client):
                         f"💵 *Total Net PnL:* `{pnl_sign}{config.format_inr(abs(net_pnl))}`\n"
                         f"📈 *Trades Executed:* {total_trades} (Wins: {wins} | WR: {win_rate:.1f}%)\n"
                         f"⚡ *Leverage:* {config.LEVERAGE}x Isolated\n"
-                        f"🎯 *Active Coins:* {', '.join(config.SYMBOLS)}"
+                        f"🪙 *Dynamic Universe:* {len(active_coins)} Liquid Coins (Filtered from 240+)\n"
+                        f"📋 *Top Coins:* `{top_preview}`"
                     )
                     send_alert(resp)
 
                 elif cmd == "/positions":
                     pos = client.state.get("open_positions", {})
+                    active_coins = getattr(client, 'active_universe', config.SYMBOLS)
                     if not pos:
-                        send_alert("📭 *No active positions open right now.* Bot is scanning Top 5 coins.")
+                        send_alert(f"📭 *No active positions open right now.* Bot is scanning Top {len(active_coins)} liquid coins.")
                     else:
                         resp = f"📂 *[ACTIVE OPEN POSITIONS ({len(pos)})]*\n═══════════════════════\n"
                         for sym, p in pos.items():

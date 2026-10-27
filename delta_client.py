@@ -23,6 +23,10 @@ class DeltaClient:
         self.base_url = config.DELTA_BASE_URL
         self.state_file = os.path.join(os.path.dirname(__file__), "elite_sniper_state.json")
         self.last_loss_timestamps = {}
+        self.contract_values = dict(getattr(config, 'CONTRACT_VALUES', {}))
+        self.active_universe = list(getattr(config, 'SYMBOLS', []))
+        self.bstock_symbols = set()
+        self.last_screener_refresh = 0
         self.load_state()
 
     def load_state(self):
@@ -114,6 +118,128 @@ class DeltaClient:
         except Exception:
             return None
 
+    def fetch_product_specs(self):
+        """
+        Fetches all perpetual futures specs from Delta Exchange India:
+        - Maps contract_value (lot size) for exact Integer Contract Rounding.
+        - Identifies non-24/7 equity bStock tokens to exclude them from crypto universe.
+        """
+        url = f"{self.base_url}/v2/products"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        bstock_symbols = set()
+        try:
+            with urllib.request.urlopen(req, timeout=12) as r:
+                data = json.loads(r.read().decode())
+                products = data.get("result", [])
+                for p in products:
+                    if p.get("contract_type") == "perpetual_futures":
+                        sym = p.get("symbol")
+                        try:
+                            cv = float(p.get("contract_value", 1.0))
+                            self.contract_values[sym] = cv
+                        except (ValueError, TypeError):
+                            pass
+                        desc = p.get("description", "")
+                        if "bStocks" in desc:
+                            bstock_symbols.add(sym)
+            self.bstock_symbols = bstock_symbols
+            print(f"📦 [PRODUCTS] Cached lot sizes for {len(self.contract_values)} products ({len(bstock_symbols)} bStocks filtered).")
+        except Exception as e:
+            print(f"[PRODUCT SPECS ERROR] {e}")
+        return bstock_symbols
+
+    def fetch_dynamic_top_universe(self, limit=None, min_volume_usd=None, max_spread_pct=None):
+        """
+        DYNAMIC INSTITUTIONAL SCREENER (240+ COIN AUTO-FILTER):
+        Executes 1 single bulk API request to /v2/tickers:
+        - Automatically filters out dead / illiquid coins (< min_volume_usd)
+        - Automatically filters out wide-spread traps (> max_spread_pct)
+        - Excludes non-24/7 equity tokens (bStocks)
+        - Always preserves core staple coins (SOL, DOGE, BTC, ETH, ADA, AVAX, BNB)
+        - Sorts remaining coins by 24h turnover to pick top liquid movers
+        - Caches contract values dynamically for zero-rejection integer lot sizing
+        """
+        if limit is None:
+            limit = getattr(config, 'DYNAMIC_UNIVERSE_LIMIT', 25)
+        if min_volume_usd is None:
+            min_volume_usd = getattr(config, 'DYNAMIC_MIN_VOLUME_USD', 500000.0)
+        if max_spread_pct is None:
+            max_spread_pct = getattr(config, 'DYNAMIC_MAX_SPREAD_PCT', 0.0020)
+
+        core_staples = getattr(config, 'CORE_STAPLES', ['SOLUSD', 'DOGEUSD', 'BTCUSD', 'ETHUSD', 'ADAUSD', 'AVAXUSD', 'BNBUSD'])
+
+        # Refresh product lot size specs if needed
+        if not self.bstock_symbols or len(self.contract_values) < 20:
+            self.fetch_product_specs()
+
+        url = f"{self.base_url}/v2/tickers"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        candidates = []
+
+        try:
+            with urllib.request.urlopen(req, timeout=12) as r:
+                data = json.loads(r.read().decode())
+                tickers = data.get("result", [])
+
+            for t in tickers:
+                if t.get("contract_type") != "perpetual_futures":
+                    continue
+
+                symbol = t.get("symbol")
+                if not symbol or symbol in self.bstock_symbols:
+                    continue
+
+                try:
+                    cv = float(t.get("contract_value", 1.0))
+                    self.contract_values[symbol] = cv
+                except (ValueError, TypeError):
+                    pass
+
+                turnover = float(t.get("turnover_usd") or 0)
+                quotes = t.get("quotes") or {}
+                try:
+                    bid = float(quotes.get("best_bid") or 0)
+                    ask = float(quotes.get("best_ask") or 0)
+                except (ValueError, TypeError):
+                    bid, ask = 0, 0
+
+                spread_pct = ((ask - bid) / ask) if ask > 0 and bid > 0 else 1.0
+                mark_price = float(t.get("mark_price") or 0)
+
+                if turnover >= min_volume_usd and spread_pct <= max_spread_pct and mark_price > 0:
+                    candidates.append({
+                        "symbol": symbol,
+                        "turnover": turnover,
+                        "spread_pct": spread_pct * 100,
+                        "mark_price": mark_price,
+                        "contract_value": self.contract_values.get(symbol, 1.0)
+                    })
+
+            # Sort by 24h turnover descending
+            candidates.sort(key=lambda x: x["turnover"], reverse=True)
+
+            universe = []
+            # 1. Guarantee core staples
+            for s in core_staples:
+                if s in self.contract_values or any(c["symbol"] == s for c in candidates):
+                    universe.append(s)
+
+            # 2. Fill up to limit with top active coins
+            for c in candidates:
+                if c["symbol"] not in universe:
+                    universe.append(c["symbol"])
+                if len(universe) >= limit:
+                    break
+
+            self.active_universe = universe
+            self.last_screener_refresh = time.time()
+            print(f"🔥 [DYNAMIC SCREENER] Selected Top {len(universe)} Liquid Coins from 240+ Delta universe.")
+            return universe
+
+        except Exception as e:
+            print(f"[SCREENER FETCH ERROR] {e}. Keeping current universe.")
+            return self.active_universe
+
     def get_current_risk_inr(self):
         """
         Compounding Engine with Max Active Capital ceiling in INR:
@@ -183,11 +309,13 @@ class DeltaClient:
             return None
 
         # Integer contract sizing for Delta Exchange India
-        contract_mult = getattr(config, 'CONTRACT_VALUES', {}).get(symbol, 1.0)
+        contract_mult = self.contract_values.get(symbol, getattr(config, 'CONTRACT_VALUES', {}).get(symbol, 1.0))
         contract_unit_usd = entry_price * contract_mult
 
+        curr_active_cap = self.state.get("active_capital_inr", config.INITIAL_CAPITAL_INR)
+        dynamic_max_pos = min(curr_active_cap * config.LEVERAGE, getattr(config, 'MAX_POSITION_INR', 2000000.0))
         raw_position_inr = risk_inr / sl_pct
-        capped_position_inr = min(raw_position_inr, config.MAX_POSITION_INR)
+        capped_position_inr = min(raw_position_inr, dynamic_max_pos)
         capped_position_usd = capped_position_inr / config.USD_INR_RATE
 
         # Calculate exact integer contracts

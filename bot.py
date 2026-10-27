@@ -18,6 +18,30 @@ import telegram_notifier
 client = DeltaClient()
 strategy = StrategyEngine(client)
 
+ACTIVE_SYMBOLS = list(getattr(config, 'SYMBOLS', []))
+LAST_UNIVERSE_REFRESH = 0
+
+def refresh_screener_universe():
+    """
+    DYNAMIC INSTITUTIONAL SCREENER SYNC:
+    Scans all 240+ Delta Exchange India contracts in 1 bulk API request and updates
+    the active trading watchlist with top liquid, tight-spread coins.
+    """
+    global ACTIVE_SYMBOLS, LAST_UNIVERSE_REFRESH
+    if getattr(config, 'DYNAMIC_UNIVERSE_ENABLED', False):
+        try:
+            top_coins = client.fetch_dynamic_top_universe(
+                limit=getattr(config, 'DYNAMIC_UNIVERSE_LIMIT', 25),
+                min_volume_usd=getattr(config, 'DYNAMIC_MIN_VOLUME_USD', 500000.0),
+                max_spread_pct=getattr(config, 'DYNAMIC_MAX_SPREAD_PCT', 0.0020)
+            )
+            if top_coins and len(top_coins) >= 3:
+                ACTIVE_SYMBOLS = top_coins
+                LAST_UNIVERSE_REFRESH = time.time()
+                print(f"🔥 [SCREENER SYNC] Active universe updated: {len(ACTIVE_SYMBOLS)} high-liquidity coins.")
+        except Exception as e:
+            print(f"[SCREENER SYNC ERROR] {e}")
+
 class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         """Responds to UptimeRobot HEAD ping with 200 OK to keep service alive."""
@@ -129,7 +153,7 @@ class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
         """
         open_pos = state.get("open_positions", {})
         if not open_pos:
-            html += "<tr><td colspan='7' style='text-align: center; color: #8b949e; padding: 20px;'>No active positions. Scanning Top 5 coins...</td></tr>"
+            html += f"<tr><td colspan='7' style='text-align: center; color: #8b949e; padding: 20px;'>No active positions. Scanning Top {len(ACTIVE_SYMBOLS)} high-liquidity coins...</td></tr>"
         else:
             for sym, p in open_pos.items():
                 side_cls = "text-green" if p['side'] == "LONG" else "text-red"
@@ -145,9 +169,16 @@ class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
                 </tr>
                 """
 
-        html += """
+        coin_badges = "".join([f"<span class='badge badge-blue' style='margin:3px;display:inline-block;'>{s}</span>" for s in ACTIVE_SYMBOLS])
+        html += f"""
                     </tbody>
                 </table>
+
+                <h3 style="margin-top:25px;">⚡ Dynamic Watchlist ({len(ACTIVE_SYMBOLS)} Screened Coins)</h3>
+                <div class="card" style="line-height:2.0;">
+                    <div class="card-title">Auto-Screened from 240+ Delta India Perpetual Futures (Min 24h Vol: $500k | Spread &lt; 0.20%)</div>
+                    {coin_badges}
+                </div>
             </div>
         </body>
         </html>
@@ -177,8 +208,8 @@ LAST_LOOP_TIMESTAMP = time.time()
 LAST_HEARTBEAT_SENT = 0
 
 def watchdog_and_heartbeat_loop(client):
-    """Background watchdog ensuring trading loop never freezes and periodic heartbeat alerts."""
-    global LAST_LOOP_TIMESTAMP, LAST_HEARTBEAT_SENT
+    """Background watchdog ensuring trading loop never freezes, periodic screener refreshes, and heartbeat alerts."""
+    global LAST_LOOP_TIMESTAMP, LAST_HEARTBEAT_SENT, LAST_UNIVERSE_REFRESH
     while True:
         try:
             time.sleep(30)
@@ -186,20 +217,26 @@ def watchdog_and_heartbeat_loop(client):
 
             # 1. Check if trading loop stalled > 90 seconds
             if now - LAST_LOOP_TIMESTAMP > 90:
-                print(f"⚠️ [WATCHDOG ALERT] Bot 2 loop stalled for {int(now - LAST_LOOP_TIMESTAMP)}s!")
+                print(f"⚠️ [WATCHDOG ALERT] Trading loop stalled for {int(now - LAST_LOOP_TIMESTAMP)}s!")
 
-            # 2. Automatic Heartbeat Pulse Every 4 Hours (14,400 seconds)
+            # 2. Hourly dynamic universe screener refresh
+            if (now - LAST_UNIVERSE_REFRESH) >= getattr(config, 'DYNAMIC_REFRESH_INTERVAL_SECONDS', 3600):
+                refresh_screener_universe()
+
+            # 3. Automatic Heartbeat Pulse Every 4 Hours (14,400 seconds)
             if (now - LAST_HEARTBEAT_SENT) >= 14400:
                 LAST_HEARTBEAT_SENT = now
                 open_cnt = len(client.state.get("open_positions", {}))
                 active_cap = client.state.get("active_capital_inr", 2000.0)
                 now_ist_str = config.get_now_ist().strftime("%Y-%m-%d %H:%M IST")
+                top_prev = ', '.join(ACTIVE_SYMBOLS[:6]) + ('...' if len(ACTIVE_SYMBOLS) > 6 else '')
                 
                 hb_msg = (
                     f"💓 *[BOT 2: FIBONACCI SNIPER HEARTBEAT]*\n"
                     f"• Time (IST): `{now_ist_str}`\n"
                     f"• System Status: 🟢 *ONLINE & SCANNING 24x7*\n"
-                    f"• Top 5 Coins: `{', '.join(config.SYMBOLS)}`\n"
+                    f"• Dynamic Universe: *{len(ACTIVE_SYMBOLS)} Liquid Coins (Screened 240+)*\n"
+                    f"• Top Watchlist: `{top_prev}`\n"
                     f"• Active Positions: *{open_cnt}*\n"
                     f"• Capital: *{config.format_inr(active_cap)}*\n"
                     f"• Health: Zero errors | UptimeRobot Active"
@@ -213,6 +250,9 @@ def main():
     active_cap = client.state.get('active_capital_inr', config.INITIAL_CAPITAL_INR)
     banked = client.state.get('banked_profit_inr', 0.0)
 
+    # Initial Screen of 240+ Coins
+    refresh_screener_universe()
+
     print("=" * 90)
     print("🎯 ICT ASIAN JUDAS SWING & OTE MASTER BOT - DELTA EXCHANGE INDIA (INR EDITION)")
     print(f"   Mode: {'🟢 PAPER TRADING (Safe Simulation)' if config.PAPER_TRADING else '🔥 REAL TRADING'}")
@@ -220,7 +260,7 @@ def main():
     print(f"   Currency: Indian Rupee (INR - ₹)")
     print(f"   Active Capital: {config.format_inr(active_cap)} | Banked Vault: {config.format_inr(banked)}")
     print(f"   Leverage: {config.LEVERAGE}x | Risk Per Trade: {config.RISK_PER_TRADE_PCT*100:.1f}%")
-    print(f"   Top 5 Coins: {', '.join(config.SYMBOLS)}")
+    print(f"   Dynamic Watchlist ({len(ACTIVE_SYMBOLS)} coins): {', '.join(ACTIVE_SYMBOLS)}")
     print(f"   Sessions (IST): Asian (05:30-12:30), London (12:30-16:30), NY (17:30-22:30)")
     print("=" * 90)
 
@@ -235,8 +275,9 @@ def main():
     # 3. Start Anti-Freeze Watchdog & Heartbeat thread
     watchdog_thread = threading.Thread(target=watchdog_and_heartbeat_loop, args=(client,), daemon=True)
     watchdog_thread.start()
-    print("🛡️ [WATCHDOG] Anti-Freeze Watchdog & 4-Hour Heartbeat active.")
+    print("🛡️ [WATCHDOG] Anti-Freeze Watchdog, 1-Hour Screener & 4-Hour Heartbeat active.")
 
+    top_preview = ', '.join(ACTIVE_SYMBOLS[:8]) + ('...' if len(ACTIVE_SYMBOLS) > 8 else '')
     # Startup Notification to Telegram
     telegram_notifier.send_alert(
         f"🚀 *[ICT SNIPER BOT STARTED - INR EDITION]*\n"
@@ -245,7 +286,8 @@ def main():
         f"🇮🇳 *Currency:* `Indian Rupee (INR - ₹)`\n"
         f"💼 *Starting Capital:* `{config.format_inr(active_cap)}`\n"
         f"⚡ *Leverage:* {config.LEVERAGE}x Isolated\n"
-        f"🪙 *Top 5 Coins:* `{', '.join(config.SYMBOLS)}`\n"
+        f"🪙 *Dynamic Universe:* Top {len(ACTIVE_SYMBOLS)} Liquid Coins (Filtered from 240+)\n"
+        f"📋 *Top Watchlist:* `{top_preview}`\n"
         f"🛡️ *Rescued Risk Management:* ACTIVE (+1.0R / BE Lock)\n"
         f"✅ Bot is actively scanning and ready for trades!"
     )
@@ -262,11 +304,24 @@ def main():
             # B. Scan symbols for new setups if space available
             open_count = len(client.state.get("open_positions", {}))
             if open_count < config.MAX_CONCURRENT_TRADES:
-                for symbol in config.SYMBOLS:
+                for symbol in ACTIVE_SYMBOLS:
                     if symbol in client.state.get("open_positions", {}):
                         continue
 
                     candles = client.fetch_candles(symbol, resolution=config.CANDLE_RESOLUTION, limit=60)
+                    if len(candles) < 25:
+                        continue
+
+                    setup = strategy.analyze_symbol(symbol, candles)
+                    if setup:
+                        client.open_position(setup)
+                        if len(client.state.get("open_positions", {})) >= config.MAX_CONCURRENT_TRADES:
+                            break
+
+        except Exception as e:
+            print(f"❌ [LOOP ERROR]: {e}")
+
+        time.sleep(scan_interval)
                     if len(candles) < 25:
                         continue
 

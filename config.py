@@ -54,30 +54,45 @@ MAX_ACTIVE_CAPITAL_INR = float(os.getenv("MAX_ACTIVE_CAPITAL_INR", "100000.0")) 
 RISK_PER_TRADE_PCT = 0.025        # 2.5% risk per trade (e.g. ₹50 risk on ₹2,000 capital)
 LEVERAGE = 20                    # 20x Leverage (Isolated Margin)
 MAX_CONCURRENT_TRADES = 3        # Maximum simultaneous open trades
-MAX_POSITION_INR = 40000.0       # ₹40,000 Position size cap (20x on ₹2,000)
+MAX_POSITION_INR = MAX_ACTIVE_CAPITAL_INR * LEVERAGE  # ₹20,00,000 Dynamic Position size cap at maximum ₹1 Lakh capital
 
 def format_inr(amount):
     """Formats currency into Indian Rupee format."""
     return f"₹{amount:,.2f}"
 
 # ========================================================================================
-# 6. ASSET UNIVERSE: TOP 5 LEADERBOARD COINS (85.2% WIN RATE ON DELTA INDIA)
+# 6. ASSET UNIVERSE: DYNAMIC INSTITUTIONAL SCREENER (240+ COIN AUTO-FILTER)
+# Delta Exchange India Bulk Public Endpoint Filter Engine
 # ========================================================================================
-SYMBOLS = [
+DYNAMIC_UNIVERSE_ENABLED = True
+DYNAMIC_UNIVERSE_LIMIT = 25                # Top 25 high-liquidity coins
+DYNAMIC_MIN_VOLUME_USD = 500000.0          # $500,000 (~₹4.5 Crore) minimum 24h volume
+DYNAMIC_MAX_SPREAD_PCT = 0.0020            # 0.20% maximum bid-ask spread
+DYNAMIC_REFRESH_INTERVAL_SECONDS = 3600    # Refresh top universe every 1 hour (3600s)
+
+# Core staples always included in active universe
+CORE_STAPLES = [
+    'SOLUSD',    # Solana
     'DOGEUSD',   # Dogecoin
+    'BTCUSD',    # Bitcoin
+    'ETHUSD',    # Ethereum
     'ADAUSD',    # Cardano
     'AVAXUSD',   # Avalanche
-    'BNBUSD',    # BNB
-    'SOLUSD'     # Solana
+    'BNBUSD'     # BNB
 ]
 
-# DELTA EXCHANGE INDIA CONTRACT VALUES (Units per 1 Contract Lot)
+# Fallback default universe if offline
+SYMBOLS = list(CORE_STAPLES)
+
+# DELTA EXCHANGE INDIA CONTRACT VALUES (Units per 1 Contract Lot) - Fallback Defaults
 CONTRACT_VALUES = {
-    'DOGEUSD': 100.0,  # 1 Contract = 100 DOGE
-    'ADAUSD': 1.0,     # 1 Contract = 1 ADA
-    'AVAXUSD': 1.0,    # 1 Contract = 1 AVAX
-    'BNBUSD': 0.1,     # 1 Contract = 0.1 BNB
-    'SOLUSD': 1.0      # 1 Contract = 1 SOL
+    'SOLUSD': 1.0,      # 1 Contract = 1 SOL
+    'DOGEUSD': 100.0,   # 1 Contract = 100 DOGE
+    'BTCUSD': 0.001,    # 1 Contract = 0.001 BTC
+    'ETHUSD': 0.01,     # 1 Contract = 0.01 ETH
+    'ADAUSD': 1.0,      # 1 Contract = 1 ADA
+    'AVAXUSD': 1.0,     # 1 Contract = 1 AVAX
+    'BNBUSD': 0.1       # 1 Contract = 0.1 BNB
 }
 
 # ========================================================================================

@@ -23,6 +23,7 @@ class StrategyEngine:
         self.client = client
         self.asian_sessions = {}  # symbol -> {'date', 'high', 'low', 'mid', 'range'}
         self.pending_ote = {}     # symbol -> pending OTE setup
+        self.trend_cache = {}     # symbol -> (bias, timestamp)
 
     def is_weekend(self):
         """Saturday (5) and Sunday (6) in IST are low-volume chop sessions."""
@@ -40,9 +41,17 @@ class StrategyEngine:
     def get_1h_trend_bias(self, symbol):
         """
         Determines 1H Macro Trend Bias using 200-EMA on 1-hour candles.
+        Cached for 5 minutes (300s) to prevent redundant API calls when scanning 25+ coins.
         """
+        now = time.time()
+        if symbol in self.trend_cache:
+            cached_bias, ts = self.trend_cache[symbol]
+            if (now - ts) < 300:
+                return cached_bias
+
         candles_1h = self.client.fetch_candles(symbol, resolution=config.TREND_RESOLUTION, limit=60)
         if len(candles_1h) < 15:
+            self.trend_cache[symbol] = ("NEUTRAL", now)
             return "NEUTRAL"
 
         closes = np.array([c["close"] for c in candles_1h])
@@ -53,10 +62,14 @@ class StrategyEngine:
 
         last_close = closes[-1]
         if last_close > ema_val:
-            return "BULLISH"
+            bias = "BULLISH"
         elif last_close < ema_val:
-            return "BEARISH"
-        return "NEUTRAL"
+            bias = "BEARISH"
+        else:
+            bias = "NEUTRAL"
+
+        self.trend_cache[symbol] = (bias, now)
+        return bias
 
     def compute_asian_range(self, symbol, candles):
         """
