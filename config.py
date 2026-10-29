@@ -113,6 +113,13 @@ LONDON_KZ_END_MINUTES = 16 * 60 + 30    # 990 mins (16:30 IST)
 NY_KZ_START_MINUTES = 17 * 60 + 30      # 1050 mins (17:30 IST)
 NY_KZ_END_MINUTES = 22 * 60 + 30        # 1350 mins (22:30 IST)
 
+# 24X7 NONSTOP TRADING MODE (CRYPTO EDITION):
+# True  = Trades 24x7 across London, NY, and Night Expansion (12:30 PM to 05:30 AM next day).
+#         05:30 AM to 12:30 PM is dedicated to Asian Range building.
+# False = Strictly limits entry to London & NY Killzones.
+ENABLE_24X7_TRADING = True
+SKIP_WEEKENDS = False  # Crypto markets operate 24/7/365
+
 # ========================================================================================
 # 8. ICT OTE & DISPLACEMENT RULES
 # ========================================================================================

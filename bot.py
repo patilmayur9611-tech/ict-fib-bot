@@ -112,6 +112,7 @@ class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
                         <span class="badge badge-purple">🇮🇳 IST: {now_ist_str}</span>
                         <span class="badge badge-green">INR (₹) EDITION</span>
                         <span class="badge badge-orange">{config.LEVERAGE}x LEVERAGE</span>
+                        <span class="badge badge-purple">24x7 NONSTOP TRADING</span>
                         <span class="badge badge-blue">{'PAPER TRADING' if config.PAPER_TRADING else 'LIVE TRADING'}</span>
                         <a href="/reset" style="background:#238636;color:white;padding:4px 8px;text-decoration:none;border-radius:4px;font-size:12px;font-weight:bold;margin-left:5px;" onclick="return confirm('Reset virtual balance to Rs 2,000 INR?');">&#128260; RESET TO &#8377;2,000</a>
                     </div>
@@ -261,7 +262,7 @@ def main():
     print(f"   Active Capital: {config.format_inr(active_cap)} | Banked Vault: {config.format_inr(banked)}")
     print(f"   Leverage: {config.LEVERAGE}x | Risk Per Trade: {config.RISK_PER_TRADE_PCT*100:.1f}%")
     print(f"   Dynamic Watchlist ({len(ACTIVE_SYMBOLS)} coins): {', '.join(ACTIVE_SYMBOLS)}")
-    print(f"   Sessions (IST): Asian (05:30-12:30), London (12:30-16:30), NY (17:30-22:30)")
+    print(f"   Trading Engine: 24x7 Nonstop (London, NY, and Night Sessions Active | Asian Range 05:30-12:30)")
     print("=" * 90)
 
     # 1. Start Web Dashboard Keep-Alive thread
@@ -286,6 +287,7 @@ def main():
         f"🇮🇳 *Currency:* `Indian Rupee (INR - ₹)`\n"
         f"💼 *Starting Capital:* `{config.format_inr(active_cap)}`\n"
         f"⚡ *Leverage:* {config.LEVERAGE}x Isolated\n"
+        f"🕒 *Trading Mode:* `24x7 Nonstop (Night & Weekend Enabled)`\n"
         f"🪙 *Dynamic Universe:* Top {len(ACTIVE_SYMBOLS)} Liquid Coins (Filtered from 240+)\n"
         f"📋 *Top Watchlist:* `{top_preview}`\n"
         f"🛡️ *Rescued Risk Management:* ACTIVE (+1.0R / BE Lock)\n"

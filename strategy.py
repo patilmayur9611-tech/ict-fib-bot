@@ -26,14 +26,26 @@ class StrategyEngine:
         self.trend_cache = {}     # symbol -> (bias, timestamp)
 
     def is_weekend(self):
-        """Saturday (5) and Sunday (6) in IST are low-volume chop sessions."""
+        """Checks if weekend trading is disabled."""
+        if not getattr(config, 'SKIP_WEEKENDS', False):
+            return False
         now_ist = config.get_now_ist()
         return now_ist.weekday() in [5, 6]
 
     def is_in_active_killzone(self):
-        """Checks if current time is inside London or NY Killzones strictly in IST (+5:30)."""
+        """
+        24X7 NONSTOP TRADING MODE:
+        - When ENABLE_24X7_TRADING = True: trades 24x7 across London, NY, and Night sessions (12:30 PM to 05:30 AM next day).
+          Only 05:30 AM to 12:30 PM IST is reserved for Asian Range building.
+        - When False: strictly limits entries to London (12:30-16:30) and NY (17:30-22:30) Killzones.
+        """
         now_ist = config.get_now_ist()
         t_minutes = now_ist.hour * 60 + now_ist.minute
+
+        if getattr(config, 'ENABLE_24X7_TRADING', True):
+            in_asian_formation = (config.ASIAN_START_MINUTES <= t_minutes < config.ASIAN_END_MINUTES)
+            return not in_asian_formation
+
         in_london = (config.LONDON_KZ_START_MINUTES <= t_minutes <= config.LONDON_KZ_END_MINUTES)
         in_ny = (config.NY_KZ_START_MINUTES <= t_minutes <= config.NY_KZ_END_MINUTES)
         return in_london or in_ny
@@ -73,18 +85,37 @@ class StrategyEngine:
 
     def compute_asian_range(self, symbol, candles):
         """
-        Computes Asian Session High, Low, and Mid strictly between 05:30 AM and 12:30 PM IST.
+        Computes Asian Session High, Low, and Mid (05:30 AM to 12:30 PM IST).
+        - Daytime (12:30 PM to 11:59 PM): Uses today's completed Asian session.
+        - Night Session (00:00 to 05:30 AM next day): Uses yesterday's completed Asian session!
         """
         now_ist = config.get_now_ist()
-        today_str = now_ist.strftime('%Y-%m-%d')
+        t_min = now_ist.hour * 60 + now_ist.minute
+
+        # If midnight to 05:30 AM IST, the reference Asian session is yesterday!
+        if t_min < config.ASIAN_START_MINUTES:
+            ref_date = (now_ist - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+        else:
+            ref_date = now_ist.strftime('%Y-%m-%d')
 
         asian_candles = []
         for c in candles:
             dt = datetime.datetime.fromtimestamp(c["time"], tz=config.IST)
-            if dt.strftime('%Y-%m-%d') == today_str:
-                t_min = dt.hour * 60 + dt.minute
-                if config.ASIAN_START_MINUTES <= t_min <= config.ASIAN_END_MINUTES:
+            if dt.strftime('%Y-%m-%d') == ref_date:
+                c_min = dt.hour * 60 + dt.minute
+                if config.ASIAN_START_MINUTES <= c_min <= config.ASIAN_END_MINUTES:
                     asian_candles.append(c)
+
+        # Fallback to yesterday if today's Asian candles are not yet enough
+        if len(asian_candles) < 4:
+            prev_date = (now_ist - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+            for c in candles:
+                dt = datetime.datetime.fromtimestamp(c["time"], tz=config.IST)
+                if dt.strftime('%Y-%m-%d') == prev_date:
+                    c_min = dt.hour * 60 + dt.minute
+                    if config.ASIAN_START_MINUTES <= c_min <= config.ASIAN_END_MINUTES:
+                        asian_candles.append(c)
+            ref_date = prev_date
 
         if len(asian_candles) < 4:
             return None
@@ -95,7 +126,7 @@ class StrategyEngine:
         range_size = asian_high - asian_low
 
         asian_data = {
-            "date": today_str,
+            "date": ref_date,
             "high": asian_high,
             "low": asian_low,
             "mid": asian_mid,

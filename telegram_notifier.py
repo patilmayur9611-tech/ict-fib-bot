@@ -186,6 +186,7 @@ def handle_telegram_updates(client):
                         f"💵 *Total Net PnL:* `{pnl_sign}{config.format_inr(abs(net_pnl))}`\n"
                         f"📈 *Trades Executed:* {total_trades} (Wins: {wins} | WR: {win_rate:.1f}%)\n"
                         f"⚡ *Leverage:* {config.LEVERAGE}x Isolated\n"
+                        f"🕒 *Trading Mode:* 24x7 Nonstop (Night & Weekend Active)\n"
                         f"🪙 *Dynamic Universe:* {len(active_coins)} Liquid Coins (Filtered from 240+)\n"
                         f"📋 *Top Coins:* `{top_preview}`"
                     )
