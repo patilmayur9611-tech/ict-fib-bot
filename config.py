@@ -54,7 +54,9 @@ MAX_ACTIVE_CAPITAL_INR = float(os.getenv("MAX_ACTIVE_CAPITAL_INR", "100000.0")) 
 RISK_PER_TRADE_PCT = 0.025        # 2.5% risk per trade (e.g. ₹50 risk on ₹2,000 capital)
 LEVERAGE = 20                    # 20x Leverage (Isolated Margin)
 MAX_CONCURRENT_TRADES = 3        # Maximum simultaneous open trades
-MAX_POSITION_INR = MAX_ACTIVE_CAPITAL_INR * LEVERAGE  # ₹20,00,000 Dynamic Position size cap at maximum ₹1 Lakh capital
+TARGET_POSITION_INR = float(os.getenv("TARGET_POSITION_INR", "9500.0"))  # Target ₹9,500 Position Size (~₹475 margin at 20x)
+MIN_POSITION_INR = 9000.0                                                # ₹9,000 Minimum Floor
+MAX_POSITION_INR = 10000.0                                               # ₹10,000 STRICT Maximum Hard Cap (Compounding STOPPED)
 
 def format_inr(amount):
     """Formats currency into Indian Rupee format."""
@@ -132,17 +134,18 @@ SL_ATR_BUFFER = 0.25             # 0.25 ATR protective buffer beyond sweep wick 
 # ========================================================================================
 # 9. RESCUED RISK MANAGEMENT RULES (Converts 50% losses into green trades!)
 # ========================================================================================
-# Level 1: +1.0R / Asian Mid -> Book 30% profit immediately & move SL to Breakeven
+# Level 1: +1.0R / Asian Mid -> Book 60% profit immediately & move SL to BREAKEVEN PLUS (slightly above entry)
 RESCUE_PROFIT_R = 1.0
-RESCUE_CLOSE_RATIO = 0.30
+RESCUE_CLOSE_RATIO = 0.60
+BREAKEVEN_PLUS_R = 0.15         # +0.15R Guaranteed Green Profit (above entry, covers all taker fees + profit)
 
-# Level 2: Asian Opposite High/Low (1.8R - 2.0R) -> Book 40% profit
+# Level 2: Asian Opposite High/Low (1.8R - 2.0R) -> Book 25% profit
 TP1_R = 1.9
-TP1_CLOSE_RATIO = 0.40
+TP1_CLOSE_RATIO = 0.25
 
-# Level 3: Runner (Remaining 30%) -> Trail to 3.0R
+# Level 3: Runner (Remaining 15%) -> Trail to 3.0R
 TP2_R = 3.0
-RUNNER_RATIO = 0.30
+RUNNER_RATIO = 0.15
 
 # ========================================================================================
 # 10. CLOUD KEEPALIVE & HEALTHCHECK SERVER (RENDER DEPLOYMENT)

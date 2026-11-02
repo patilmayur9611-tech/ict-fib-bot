@@ -175,6 +175,47 @@ class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
                     </tbody>
                 </table>
 
+                <h3 style="margin-top:25px;">📜 Recent Closed Trades ({len(trades)})</h3>
+                <table class="pos-table">
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Time (IST)</th>
+                            <th>Coin</th>
+                            <th>Side</th>
+                            <th>Entry</th>
+                            <th>Exit</th>
+                            <th>Reason</th>
+                            <th>Net PnL (INR)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        """
+        if not trades:
+            html += "<tr><td colspan='8' style='text-align: center; color: #8b949e; padding: 15px;'>No closed trades recorded yet.</td></tr>"
+        else:
+            for idx, ct in enumerate(reversed(trades[-50:]), 1):
+                pnl_val = ct.get("final_pnl_inr", 0.0)
+                pnl_cls = "text-green" if pnl_val >= 0 else "text-red"
+                side_cls = "text-green" if ct.get("side") == "LONG" else "text-red"
+                html += f"""
+                <tr>
+                    <td>{idx}</td>
+                    <td><small style='color:#8b949e;'>{ct.get('exit_time', ct.get('entry_time', '-'))}</small></td>
+                    <td><b>{ct.get('symbol')}</b></td>
+                    <td class="{side_cls}">{ct.get('side')}</td>
+                    <td>${ct.get('entry_price', 0):.4f}</td>
+                    <td>${ct.get('exit_price', 0):.4f}</td>
+                    <td><small>{ct.get('exit_reason', ct.get('reason', '-'))}</small></td>
+                    <td class="{pnl_cls}">+{config.format_inr(pnl_val)}</td>
+                </tr>
+                """
+
+        coin_badges = "".join([f"<span class='badge badge-blue' style='margin:3px;display:inline-block;'>{s}</span>" for s in ACTIVE_SYMBOLS])
+        html += f"""
+                    </tbody>
+                </table>
+
                 <h3 style="margin-top:25px;">⚡ Dynamic Watchlist ({len(ACTIVE_SYMBOLS)} Screened Coins)</h3>
                 <div class="card" style="line-height:2.0;">
                     <div class="card-title">Auto-Screened from 240+ Delta India Perpetual Futures (Min 24h Vol: $500k | Spread &lt; 0.20%)</div>
@@ -260,7 +301,7 @@ def main():
     print(f"   Clock: {now_ist_str} IST (Locked UTC+5:30)")
     print(f"   Currency: Indian Rupee (INR - ₹)")
     print(f"   Active Capital: {config.format_inr(active_cap)} | Banked Vault: {config.format_inr(banked)}")
-    print(f"   Leverage: {config.LEVERAGE}x | Risk Per Trade: {config.RISK_PER_TRADE_PCT*100:.1f}%")
+    print(f"   Leverage: {config.LEVERAGE}x | Target Position: ₹9,000 - ₹10,000 (~₹475 margin)")
     print(f"   Dynamic Watchlist ({len(ACTIVE_SYMBOLS)} coins): {', '.join(ACTIVE_SYMBOLS)}")
     print(f"   Trading Engine: 24x7 Nonstop (London, NY, and Night Sessions Active | Asian Range 05:30-12:30)")
     print("=" * 90)
@@ -287,6 +328,7 @@ def main():
         f"🇮🇳 *Currency:* `Indian Rupee (INR - ₹)`\n"
         f"💼 *Starting Capital:* `{config.format_inr(active_cap)}`\n"
         f"⚡ *Leverage:* {config.LEVERAGE}x Isolated\n"
+        f"🎯 *Position Size:* `₹9,000 - ₹10,000 (~₹475 Margin)`\n"
         f"🕒 *Trading Mode:* `24x7 Nonstop (Night & Weekend Enabled)`\n"
         f"🪙 *Dynamic Universe:* Top {len(ACTIVE_SYMBOLS)} Liquid Coins (Filtered from 240+)\n"
         f"📋 *Top Watchlist:* `{top_preview}`\n"

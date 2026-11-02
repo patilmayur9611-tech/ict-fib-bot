@@ -267,23 +267,27 @@ class DeltaClient:
     def calculate_integer_exit_contracts(self, total_contracts):
         """
         INTEGER CONTRACT ROUNDING ENGINE FOR DELTA EXCHANGE INDIA:
-        Guarantees that 30% / 40% / 30% partial exits are strictly whole integer lots.
+        Guarantees that 60% / 25% / 15% partial exits are strictly whole integer lots.
         Prevents Delta Exchange API rejection: 'contract_size must be an integer'.
         Sum of exit_1 + exit_2 + exit_3 ALWAYS equals total_contracts exactly!
         """
-        if total_contracts >= 3:
-            exit_1 = max(1, int(round(total_contracts * 0.30)))
-            exit_2 = max(1, int(round(total_contracts * 0.40)))
+        if total_contracts >= 4:
+            exit_1 = max(1, int(round(total_contracts * 0.60)))
+            exit_2 = max(1, int(round(total_contracts * 0.25)))
             exit_3 = total_contracts - exit_1 - exit_2
             if exit_3 < 0:
                 exit_2 += exit_3
                 exit_3 = 0
+        elif total_contracts == 3:
+            exit_1 = 2  # 66%
+            exit_2 = 1  # 33%
+            exit_3 = 0
         elif total_contracts == 2:
             exit_1 = 1  # 50%
             exit_2 = 1  # 50%
             exit_3 = 0
         else: # total_contracts == 1
-            exit_1 = 0  # Locks Breakeven SL, exits 1 full contract at TP1
+            exit_1 = 0  # 1 full contract rides to TP1 with Breakeven Plus locked!
             exit_2 = 1
             exit_3 = 0
         return int(exit_1), int(exit_2), int(exit_3)
@@ -313,22 +317,37 @@ class DeltaClient:
         contract_unit_usd = entry_price * contract_mult
 
         curr_active_cap = self.state.get("active_capital_inr", config.INITIAL_CAPITAL_INR)
-        dynamic_max_pos = min(curr_active_cap * config.LEVERAGE, getattr(config, 'MAX_POSITION_INR', 2000000.0))
-        raw_position_inr = risk_inr / sl_pct
-        capped_position_inr = min(raw_position_inr, dynamic_max_pos)
-        capped_position_usd = capped_position_inr / config.USD_INR_RATE
+        
+        # Margin buffer check: Ensure at least ₹400 free balance remains before taking trade
+        total_margin_used = sum(p.get("margin_used_inr", 0) for p in self.state["open_positions"].values())
+        free_capital = curr_active_cap - total_margin_used
+        if free_capital < 400.0:
+            print(f"⚠️ [MARGIN BUFFER] Free capital ({config.format_inr(free_capital)}) is below minimum buffer (₹400). Skipping {symbol}.")
+            return None
 
-        # Calculate exact integer contracts
-        raw_contracts = capped_position_usd / contract_unit_usd
+        # STRICT FIXED SIZING: Fixed ₹9,000 - ₹10,000 per trade (Compounding STOPPED)
+        # Position size will NEVER exceed ₹10,000 INR regardless of capital or tight SL
+        target_pos_inr = getattr(config, 'TARGET_POSITION_INR', 9500.0)
+        max_pos_inr = getattr(config, 'MAX_POSITION_INR', 10000.0)
+        
+        target_pos_usd = target_pos_inr / config.USD_INR_RATE
+        raw_contracts = target_pos_usd / contract_unit_usd
         total_contracts = max(1, int(round(raw_contracts)))
+
+        # Hard guard: If integer contract rounding exceeds MAX_POSITION_INR (₹10,000), round down
+        actual_position_usd = total_contracts * contract_unit_usd
+        actual_position_inr = actual_position_usd * config.USD_INR_RATE
+        if total_contracts > 1 and actual_position_inr > max_pos_inr:
+            total_contracts = max(1, int(target_pos_usd // contract_unit_usd))
+            actual_position_usd = total_contracts * contract_unit_usd
+            actual_position_inr = actual_position_usd * config.USD_INR_RATE
 
         # Calculate exact integer contract exits (30% / 40% / 30%)
         exit_1_contracts, exit_2_contracts, exit_3_contracts = self.calculate_integer_exit_contracts(total_contracts)
 
-        actual_position_usd = total_contracts * contract_unit_usd
-        actual_position_inr = actual_position_usd * config.USD_INR_RATE
         margin_used_inr = actual_position_inr / config.LEVERAGE
         entry_inr_est = entry_price * config.USD_INR_RATE
+        actual_risk_inr = actual_position_inr * sl_pct
 
         now_str = config.get_now_ist().strftime('%Y-%m-%d %H:%M:%S')
         trade = {
@@ -344,7 +363,7 @@ class DeltaClient:
             "tp1_price": tp1_price,
             "tp2_price": tp2_price,
             "sl_pct": sl_pct * 100,
-            "risk_inr": risk_inr,
+            "risk_inr": actual_risk_inr,
             "position_inr": actual_position_inr,
             "position_usd": actual_position_usd,
             "total_contracts": total_contracts,
@@ -413,11 +432,14 @@ class DeltaClient:
                         pnl_rescue_inr = 0.0
 
                     trade["rescue_hit"] = True
-                    trade["sl_price"] = entry_price  # BREAKEVEN LOCK!
+                    # BREAKEVEN PLUS: Set Stop Loss slightly above entry in guaranteed profit!
+                    r_dist = abs(entry_price - trade["initial_sl"])
+                    be_plus_buffer = getattr(config, 'BREAKEVEN_PLUS_R', 0.15) * r_dist
+                    trade["sl_price"] = (entry_price + be_plus_buffer) if side == "LONG" else (entry_price - be_plus_buffer)
 
                     self.save_state()
                     telegram_notifier.notify_rescue_hit(trade, pnl_rescue_inr)
-                    print(f"🛡️ [RESCUED TRIGGERED] {symbol} closed {exit_contracts} contract(s) (+{config.format_inr(pnl_rescue_inr)}) & SL moved to BREAKEVEN!")
+                    print(f"🛡️ [RESCUED TRIGGERED] {symbol} closed {exit_contracts} contract(s) (+{config.format_inr(pnl_rescue_inr)}) & SL locked at BREAKEVEN PLUS (${trade['sl_price']:.4f})!")
 
             # ---------------------------------------------------------
             # 2. TARGET 1 (Asian High/Low): Integer Contract Exit + Trailing SL
@@ -466,26 +488,33 @@ class DeltaClient:
                 continue
 
             # ---------------------------------------------------------
-            # 4. STOP LOSS CHECK (Breakeven or Initial SL)
+            # 4. STOP LOSS CHECK (Breakeven Plus, Trailing SL or Initial SL)
             # ---------------------------------------------------------
             hit_sl = (current_price <= sl_price) if side == "LONG" else (current_price >= sl_price)
             if hit_sl:
                 rem_c = trade.get("remaining_contracts", 0)
                 closed_ratio = (rem_c / total_c) if rem_c > 0 else trade.get("remaining_ratio", 1.0)
                 remaining_val_inr = pos_inr * closed_ratio
-                loss_dist_pct = abs(sl_price - entry_price) / entry_price
+                trade["exit_price"] = sl_price
 
-                if sl_price == entry_price:
-                    loss_remaining_inr = 0.0
+                # Check if SL is in profit (Trailing SL or Breakeven Plus) or in loss
+                is_profit_sl = (sl_price > entry_price) if side == "LONG" else (sl_price < entry_price)
+                if is_profit_sl:
+                    pnl_dist_pct = abs(sl_price - entry_price) / entry_price
+                    remaining_pnl_inr = remaining_val_inr * pnl_dist_pct
+                    reason = "TRAILING_PROFIT_SL" if trade.get("tp1_hit") else "BREAKEVEN_PLUS_PROFIT_EXIT"
+                elif sl_price == entry_price:
+                    remaining_pnl_inr = 0.0
                     reason = "BREAKEVEN_PROTECTED_EXIT"
                 else:
-                    loss_remaining_inr = -(remaining_val_inr * loss_dist_pct)
+                    loss_dist_pct = abs(sl_price - entry_price) / entry_price
+                    remaining_pnl_inr = -(remaining_val_inr * loss_dist_pct)
                     reason = "STOP_LOSS_EXIT"
 
                 trade["remaining_contracts"] = 0
                 trade["remaining_ratio"] = 0.0
-                total_trade_pnl_inr = trade["realized_pnl_inr"] + loss_remaining_inr
-                self._apply_realized_pnl_inr(loss_remaining_inr)
+                total_trade_pnl_inr = trade["realized_pnl_inr"] + remaining_pnl_inr
+                self._apply_realized_pnl_inr(remaining_pnl_inr)
 
                 telegram_notifier.notify_sl_hit(trade, total_trade_pnl_inr, reason)
                 symbols_to_close.append((symbol, reason, total_trade_pnl_inr, current_price))

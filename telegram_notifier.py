@@ -71,14 +71,15 @@ def notify_entry(trade):
     send_alert(msg)
 
 def notify_rescue_hit(trade, pnl_rescue_inr):
-    """Alerts when Level 1 (+1.0R / Asian Mid) is hit and SL is locked to Breakeven."""
+    """Alerts when Level 1 (+1.0R / Asian Mid) is hit and SL is locked to Breakeven Plus."""
+    sl_px = trade.get('sl_price', trade['entry_price'])
     msg = (
-        f"🛡️ *[RESCUE LEVEL 1 HIT - 30% BOOKED]* 💰\n"
+        f"🛡️ *[RESCUE LEVEL 1 HIT - 60% BOOKED]* 💰\n"
         f"═══════════════════════\n"
         f"🪙 Asset: *{trade['symbol']}*\n"
-        f"💵 Profit Secured (30%): *+{config.format_inr(pnl_rescue_inr)}*\n"
-        f"🔒 *Stop-Loss Shifted to BREAKEVEN (${trade['entry_price']:.4f})*\n"
-        f"🛡️ Remaining 70% is now 100% *RISK-FREE*!\n"
+        f"💵 Heavy Profit Secured (60%): *+{config.format_inr(pnl_rescue_inr)}*\n"
+        f"🔒 *SL Shifted to BREAKEVEN PLUS (${sl_px:.4f})*\n"
+        f"🛡️ Remaining 40% is *100% IN GUARANTEED GREEN PROFIT*!\n"
         f"🕒 Time: `{config.get_now_ist().strftime('%H:%M:%S')}` IST"
     )
     send_alert(msg)
@@ -86,12 +87,12 @@ def notify_rescue_hit(trade, pnl_rescue_inr):
 def notify_tp1_hit(trade, pnl_tp1_inr, new_sl):
     """Alerts when Target 1 (Asian High/Low) hits and trails SL into profit."""
     msg = (
-        f"🎯 *[ASIAN TARGET 1 HIT - 40% BOOKED]* 💰\n"
+        f"🎯 *[ASIAN TARGET 1 HIT - 25% BOOKED]* 💰\n"
         f"═══════════════════════\n"
         f"🪙 Asset: *{trade['symbol']}*\n"
-        f"💵 Target 1 Profit (40%): *+{config.format_inr(pnl_tp1_inr)}*\n"
-        f"📈 *Trailing SL locked in PROFIT at ${new_sl:.4f}*\n"
-        f"🚀 30% Runner open for Target 2 Home Run!\n"
+        f"💵 Target 1 Profit (25%): *+{config.format_inr(pnl_tp1_inr)}*\n"
+        f"📈 *Trailing SL locked in HIGHER PROFIT at ${new_sl:.4f}*\n"
+        f"🚀 15% Runner open for Target 2 Home Run!\n"
         f"🕒 Time: `{config.get_now_ist().strftime('%H:%M:%S')}` IST"
     )
     send_alert(msg)
