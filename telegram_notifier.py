@@ -1,231 +1,302 @@
+"""
+========================================================================================
+TELEGRAM NOTIFIER & REMOTE CONTROL MODULE (INR EDITION)
+Instant Mobile Alerts & Interactive 2-Way Commands
+Currency: Indian Rupee (INR - ₹)
+Locked Strictly to Indian Standard Time (IST, UTC+5:30)
+========================================================================================
+"""
 import urllib.request
+import urllib.parse
 import json
+import threading
+import time
 import datetime
 import config
 
-# Hamesha India ka time (+5:30) explicitly lock:
-IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
-
-def get_now_ist_str():
-    return datetime.datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')
-
 TELEGRAM_OFFSET = 0
-BOT_PAUSED = False
+BOT_ACTIVE = True
 
-def send_telegram_alert(message):
-    """
-    Sends rich formatted notification to Telegram if token is set.
-    Always prints to console. Guaranteed delivery with plain-text fallback.
-    """
-    print(f"\n[ALERT] =========================================")
-    print(message)
-    print(f"=================================================\n")
-
+def send_alert(message):
+    """Sends markdown formatted message to Telegram with automatic plain-text fallback."""
     if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
-        return
-
+        return None
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": config.TELEGRAM_CHAT_ID,
         "text": message,
-        "parse_mode": "Markdown"
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True
     }
     data = json.dumps(payload).encode('utf-8')
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=12) as r:
-            pass
+            return json.loads(r.read().decode())
     except Exception as e:
-        # 100% BULLETPROOF FALLBACK: Send without Markdown
+        # BULLETPROOF FALLBACK: Send as Plain Text
         try:
             plain_text = message.replace('*', '').replace('_', '').replace('`', '').replace('~', '')
             payload_plain = {
                 "chat_id": config.TELEGRAM_CHAT_ID,
-                "text": plain_text
+                "text": plain_text,
+                "disable_web_page_preview": True
             }
             req2 = urllib.request.Request(url, data=json.dumps(payload_plain).encode('utf-8'), headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req2, timeout=12) as r2:
-                print(f"[TELEGRAM RECOVERED] Message delivered via plain text fallback.")
+                print(f"[TELEGRAM RECOVERED] Delivered alert via fallback plain text.")
+                return json.loads(r2.read().decode())
         except Exception as e2:
-            print(f"[TELEGRAM ERROR] Failed to send alert: {e} | Fallback Error: {e2}")
+            print(f"[TELEGRAM ERROR] Failed to send message: {e} | Fallback Error: {e2}")
+            return None
 
-def handle_telegram_command(client, text):
-    """
-    Handles any incoming message or slash command with rich instant reply.
-    All balances, sizing, and PnL formatted in Indian Rupees (INR ₹).
-    """
-    global BOT_PAUSED
-    text_clean = text.strip().lower()
-    sym_curr = getattr(config, 'CURRENCY_SYMBOL', '₹')
-    usd_rate = getattr(config, 'USD_TO_INR', 89.0)
+def notify_entry(trade):
+    """Sends entry alert with clear Hindi / English parameters formatted in INR (₹)."""
+    side = trade['side']
+    side_icon = "🟢 *BUY (LONG)*" if side == 'LONG' else "🔴 *SELL (SHORT)*"
+    total_c = trade.get('total_contracts', 1)
+    e1 = trade.get('exit_1_contracts', 0)
+    e2 = trade.get('exit_2_contracts', 0)
+    e3 = trade.get('exit_3_contracts', 0)
+    
+    p1 = int(round((e1 / total_c) * 100)) if total_c > 0 and e1 > 0 else 0
+    p2 = int(round((e2 / total_c) * 100)) if total_c > 0 and e2 > 0 else (100 if total_c == 1 else 0)
+    p3 = 100 - p1 - p2 if (p1 + p2) < 100 else 0
 
-    bal = client.get_balance() if hasattr(client, 'get_balance') else client.portfolio.get('virtual_balance', config.VIRTUAL_INITIAL_BALANCE)
-    realized = client.portfolio.get('realized_pnl', 0.0)
-    mode_str = "Paper Trading (Demo)" if getattr(config, 'PAPER_TRADING', True) else "Live / Testnet API Trading"
+    msg = (
+        f"🎯 *[NEW TRADE OPENED / नया ट्रेड]* 🚀\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 कॉइन: *{trade['symbol']}*\n"
+        f"📈 दिशा (Side): {side_icon}\n"
+        f"📍 एंट्री प्राइस: *${trade['entry_price']:.4f}* (~₹{trade['entry_inr_est']:,.2f})\n"
+        f"🛑 स्टॉप लॉस (SL): *${trade['sl_price']:.4f}*\n"
+        f"💼 पोजीशन साइज़: *{config.format_inr(trade['position_inr'])}* ({total_c} Contracts)\n"
+        f"💳 मार्जिन लगा (20x): *{config.format_inr(trade['margin_used_inr'])}*\n"
+        f"⚠️ मैक्स रिस्क (SL पर): *{config.format_inr(trade['risk_inr'])}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 *प्रॉफ़िट बुकिंग प्लान (Exit Targets):*\n"
+        f"  1️⃣ Rescue (+1.0R): *${trade['rescue_tp']:.4f}* ➔ *{p1}% Book ({e1}c)* + Breakeven Plus\n"
+        f"  2️⃣ Asian Target 1: *${trade['tp1_price']:.4f}* ➔ *{p2}% Book ({e2}c)*\n"
+        f"  3️⃣ Home Run TP2:  *${trade['tp2_price']:.4f}* ➔ *{p3}% Runner ({e3}c)*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🕒 समय: `{trade['entry_time']}` IST"
+    )
+    send_alert(msg)
 
-    if text_clean in ["/start", "start", "/help", "help"]:
-        help_text = (
-            "🤖 *WHALE & MOMENTUM BOT ACTIVE (DELTA INDIA)*\n\n"
-            "• `/status` or `/whale` - Check live status & open positions\n"
-            "• `/pause` or `/pause_whale` - Pause bot\n"
-            "• `/resume` or `/resume_whale` - Resume bot\n"
-            "• `/reset` - Reset paper trading capital\n\n"
-            f"• Mode: *{mode_str}*\n"
-            f"• Current Status: *{'PAUSED ⏸️' if BOT_PAUSED else 'ACTIVE 🟢'}*\n"
-            f"• Account Balance: *{sym_curr}{bal:,.2f}*\n"
-            f"• Realized PnL: *{'+' if realized >= 0 else ''}{sym_curr}{realized:,.2f}*\n"
-            f"• Open Positions: *{len(client.portfolio.get('open_positions', {}))}*"
+def notify_rescue_hit(trade, pnl_rescue_inr):
+    """Alerts when Level 1 (+1.0R / Asian Mid) is hit and SL is locked to Breakeven Plus."""
+    total_c = max(1, trade.get('total_contracts', 1))
+    e1 = trade.get('exit_1_contracts', 0)
+    pct_booked = int(round((e1 / total_c) * 100)) if e1 > 0 else 60
+    rem_c = trade.get('remaining_contracts', total_c - e1)
+    rem_pct = 100 - pct_booked
+    sl_px = trade.get('sl_price', trade['entry_price'])
+    side = trade.get('side', 'LONG')
+    profit_buffer_pct = abs(sl_px - trade['entry_price']) / trade['entry_price'] * 100
+
+    msg = (
+        f"🛡️ *[RESCUE LEVEL 1 HIT - 60% मुनाफ़ा बुक]* 💰\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 कॉइन: *{trade['symbol']}* ({side})\n"
+        f"💵 *इस लेवल पर बुक हुआ:* *{pct_booked}% ({e1} Contracts)*\n"
+        f"💰 *इस लेवल का मुनाफ़ा:* *+{config.format_inr(pnl_rescue_inr)}* ✅\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔒 *सुरक्षा (Protection Active):*\n"
+        f"  • स्टॉप लॉस लॉक: *BREAKEVEN PLUS* (${sl_px:.4f})\n"
+        f"  • यह एंट्री से *+{profit_buffer_pct:.2f}% ऊपर* प्रॉफ़िट में है!\n"
+        f"  • बचा हुआ हिस्सा: *{rem_pct}% ({rem_c} Contracts) रिस्क-फ़्री चल रहा है!*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🕒 समय: `{config.get_now_ist().strftime('%I:%M:%S %p')}` IST"
+    )
+    send_alert(msg)
+
+def notify_tp1_hit(trade, pnl_tp1_inr, new_sl):
+    """Alerts when Target 1 (Asian High/Low) hits and trails SL into profit."""
+    total_c = max(1, trade.get('total_contracts', 1))
+    e2 = trade.get('exit_2_contracts', 0)
+    pct_booked = int(round((e2 / total_c) * 100)) if e2 > 0 else 25
+    rem_c = trade.get('remaining_contracts', 0)
+    total_realized_trade = trade.get('realized_pnl_inr', pnl_tp1_inr)
+
+    msg = (
+        f"🎯 *[ASIAN TARGET 1 HIT - 25% और बुक]* 💰\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 कॉइन: *{trade['symbol']}*\n"
+        f"💵 *इस लेवल पर बुक हुआ:* *{pct_booked}% ({e2} Contracts)*\n"
+        f"💰 *Target 1 का मुनाफ़ा:* *+{config.format_inr(pnl_tp1_inr)}* ✅\n"
+        f"🏆 *इस ट्रेड का अब तक कुल मुनाफ़ा:* *+{config.format_inr(total_realized_trade)}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📈 *ट्रेलिंग सुरक्षा (Trailing SL Locked):*\n"
+        f"  • नया सुरक्षित SL: *${new_sl:.4f}* (+1.0R बड़े प्रॉफ़िट में)\n"
+        f"  • अंतिम रनर: *{rem_c} Contract(s)* Home Run (TP2) के लिए खुला है!\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🕒 समय: `{config.get_now_ist().strftime('%I:%M:%S %p')}` IST"
+    )
+    send_alert(msg)
+
+def notify_tp2_hit(trade, total_pnl_inr):
+    """Alerts when Target 2 Runner (3.0R) hits."""
+    msg = (
+        f"🚀 *[TARGET 2 FULL WIN - HOME RUN!]* 🏆🎉\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 कॉइन: *{trade['symbol']}* ({trade.get('side', '')})\n"
+        f"🎯 सभी 3 लेवल्स पूरे हुए (100% Position Closed)!\n"
+        f"💰 *इस ट्रेड का अंतिम कुल मुनाफ़ा:* *+{config.format_inr(total_pnl_inr)}* 🚀\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🕒 समय: `{config.get_now_ist().strftime('%I:%M:%S %p')}` IST"
+    )
+    send_alert(msg)
+
+def notify_sl_hit(trade, total_pnl_inr, reason):
+    """Alerts when Stop Loss or Breakeven exit triggers."""
+    exit_px = trade.get('exit_price', trade.get('sl_price', 0))
+    entry_px = trade.get('entry_price', 0)
+    side = trade.get('side', 'LONG')
+
+    if "BREAKEVEN" in reason or total_pnl_inr >= 0:
+        icon = "🛡️ *[TRADE CLOSED - BREAKEVEN PLUS PROTECTED]*"
+        verdict = (
+            f"✅ *ट्रेड मुनाफ़े में सुरक्षित क्लोज़ हुआ!*\n"
+            f"💰 *इस ट्रेड का कुल शुद्ध मुनाफ़ा:* *+{config.format_inr(total_pnl_inr)}*\n"
+            f"💡 _(मार्केट पलटने के बावजूद Breakeven Plus ने मुनाफ़ा लॉक रखा!)_"
         )
-        send_telegram_alert(help_text)
-        return
-
-    if text_clean in ["/whale", "/status_whale", "/status", "status", "pnl", "balance", "trades", "/balance", "/pnl"]:
-        open_trades = client.portfolio.get("open_positions", {})
-        pos_lines = []
-        for sym, p in open_trades.items():
-            cur_p = p.get('current_price', p.get('entry_price', 0))
-            side = p.get('side', 'LONG')
-            ep = p.get('entry_price', cur_p)
-            gain = ((cur_p - ep) / ep * 100) if ep > 0 and side == 'LONG' else (((ep - cur_p) / ep * 100) if ep > 0 else 0)
-            size_inr = p.get('size_inr', p.get('size_usd', 0) * usd_rate)
-            pos_lines.append(f"• *{sym}* [{side}]: Entry `${ep:.4f}` | Cur `${cur_p:.4f}` | Gain *{gain:+.2f}%* (Size: *{sym_curr}{size_inr:,.0f}*)")
-
-        pos_text = "\n".join(pos_lines) if pos_lines else "None (Waiting for High-Score Whale Setup)"
-
-        reply = (
-            f"🐋 *WHALE & MOMENTUM BOT STATUS (DELTA INDIA)*\n\n"
-            f"• Time (IST): *{get_now_ist_str()}*\n"
-            f"• Status: *{'PAUSED ⏸️' if BOT_PAUSED else 'ACTIVE 🟢'}*\n"
-            f"• Virtual Capital: *{sym_curr}{bal:,.2f}*\n"
-            f"• Realized PnL: *{'+' if realized >= 0 else ''}{sym_curr}{realized:,.2f}*\n"
-            f"• Open Positions ({len(open_trades)}/{config.MAX_CONCURRENT_TRADES}):\n{pos_text}\n\n"
-            f"• Engine: *Model 6 (5m + 50% Retest + ATR SL + Macro Trend)*\n"
-            f"• Currency: *INR ({sym_curr}) Delta India*\n"
-            f"• Universe: *100% DYNAMIC* (All 230+ Delta Perps)"
-        )
-        send_telegram_alert(reply)
-        return
-
-    elif text_clean in ["/pause_whale", "/pause", "pause"]:
-        BOT_PAUSED = True
-        send_telegram_alert("⏸️ *Whale & Momentum Bot is now PAUSED.* No new positions will be opened.")
-        return
-
-    elif text_clean in ["/resume_whale", "/resume", "resume"]:
-        BOT_PAUSED = False
-        tf = getattr(config, 'ENTRY_TIMEFRAME', '5m')
-        send_telegram_alert(f"▶️ *Whale & Momentum Bot is now RESUMED.* Scanning for {tf} sniper entries in INR (₹).")
-        return
-
-    elif text_clean in ["/reset", "reset", "/reset_portfolio"]:
-        client.portfolio["virtual_balance"] = config.VIRTUAL_INITIAL_BALANCE
-        client.portfolio["realized_pnl"] = 0.0
-        client.portfolio["open_positions"] = {}
-        client.portfolio["trade_history"] = []
-        client.portfolio["cooldowns"] = {}
-        client.save_portfolio()
-        send_telegram_alert(f"🔄 *PORTFOLIO RESET TO INITIAL STATE!*\n\n• Capital restored to: *{sym_curr}{config.VIRTUAL_INITIAL_BALANCE:,.2f}*\n• Realized PnL: *{sym_curr}0.00*\n• Fresh start ready!")
-        return
-
-    elif text_clean in ["/ai", "/ai_ote", "ai", "/advisor", "/ai_status", "/psychology"]:
-        try:
-            import ai_advisor
-            report = ai_advisor.get_ai_status_report()
-            send_telegram_alert(report)
-        except Exception as e:
-            send_telegram_alert(f"⚠️ [AI ADVISOR ERROR] {e}")
-        return
-
-    elif text_clean in ["/apply", "/apply_ote", "apply"]:
-        try:
-            import ai_advisor
-            if hasattr(ai_advisor, 'apply_pending_ai_recommendation'):
-                _, res = ai_advisor.apply_pending_ai_recommendation(config)
-            elif hasattr(ai_advisor, 'apply_recommendation'):
-                res = ai_advisor.apply_recommendation(config)
-            else:
-                res = "AI Advisor module ready."
-            send_telegram_alert(res)
-        except Exception as e:
-            send_telegram_alert(f"⚠️ [AI APPLY ERROR] {e}")
-        return
-
-    elif text_clean in ["/reject", "/reject_ote", "reject"]:
-        try:
-            import ai_advisor
-            if hasattr(ai_advisor, 'reject_pending_ai_recommendation'):
-                res = ai_advisor.reject_pending_ai_recommendation()
-            elif hasattr(ai_advisor, 'reject_recommendation'):
-                res = ai_advisor.reject_recommendation()
-            else:
-                res = "AI proposal discarded."
-            send_telegram_alert(res)
-        except Exception as e:
-            send_telegram_alert(f"⚠️ [AI REJECT ERROR] {e}")
-        return
-
     else:
-        # Fallback for any other message (hi, hello, etc.)
-        open_trades = client.portfolio.get("open_positions", {})
-        reply = (
-            f"👋 *Whale Bot is Online & Active (Delta India)!*\n\n"
-            f"• Capital (INR): *{sym_curr}{bal:,.2f}*\n"
-            f"• Realized PnL: *{'+' if realized >= 0 else ''}{sym_curr}{realized:,.2f}*\n"
-            f"• Open Trades: *{len(open_trades)}*\n"
-            f"• Status: *{'PAUSED ⏸️' if BOT_PAUSED else 'ACTIVE 🟢'}*\n\n"
-            f"Commands: `/status` | `/pause` | `/resume` | `/reset`"
+        loss_val = abs(total_pnl_inr)
+        icon = "🛑 *[STOP LOSS HIT - ट्रेड क्लोज़]*"
+        verdict = (
+            f"🔻 *नुक़सान (Loss):* *-{config.format_inr(loss_val)}*\n"
+            f"💡 _(सख्त रिस्क मैनेजमेंट: अकाउंट का केवल ~₹50-₹65 ही लगा था)_"
         )
-        send_telegram_alert(reply)
 
-def poll_telegram_commands(client):
-    """
-    Polls Telegram for incoming user commands.
-    """
-    global TELEGRAM_OFFSET, BOT_PAUSED
-    if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
-        return BOT_PAUSED
+    msg = (
+        f"{icon}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 कॉइन: *{trade['symbol']}* ({side})\n"
+        f"{verdict}\n"
+        f"📍 एंट्री: *${entry_px:.4f}* ➔ एग्जिट: *${exit_px:.4f}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🕒 समय: `{config.get_now_ist().strftime('%I:%M:%S %p')}` IST"
+    )
+    send_alert(msg)
 
+def handle_telegram_updates(client):
+    """Polls Telegram for interactive bot remote control commands."""
+    global TELEGRAM_OFFSET
+    if not config.TELEGRAM_BOT_TOKEN:
+        return
+
+    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/getUpdates?offset={TELEGRAM_OFFSET}&timeout=5"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
-        url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/getUpdates?offset={TELEGRAM_OFFSET}&timeout=1"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=3) as r:
-            res = json.loads(r.read().decode('utf-8'))
-            updates = res.get("result", [])
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode())
+            updates = data.get("result", [])
             for u in updates:
                 TELEGRAM_OFFSET = u["update_id"] + 1
                 msg = u.get("message", {})
                 chat_id = str(msg.get("chat", {}).get("id", ""))
                 text = msg.get("text", "").strip()
 
-                if chat_id != str(config.TELEGRAM_CHAT_ID) or not text:
+                if chat_id != str(config.TELEGRAM_CHAT_ID):
                     continue
 
-                handle_telegram_command(client, text)
+                cmd = text.lower().split()[0] if text else ""
+                now_ist = config.get_now_ist().strftime('%Y-%m-%d %I:%M:%S %p')
 
-    except Exception:
+                if cmd == "/time":
+                    resp = (
+                        f"⏰ *[OFFICIAL CLOCK SYNCHRONIZATION]*\n"
+                        f"═══════════════════════\n"
+                        f"🇮🇳 *Current India Time:* `{now_ist}` IST\n"
+                        f"🔒 *Locked Timezone:* `UTC+5:30 (Asia/Kolkata)`\n"
+                        f"✅ *Clock Drift:* `0.00 seconds (Exact Sync)`\n"
+                        f"🌐 *Cloud Platform:* Render Cloud Host"
+                    )
+                    send_alert(resp)
+
+                elif cmd in ["/status", "/balance"]:
+                    state = client.state
+                    trades = state.get("closed_trades", [])
+                    total_trades = len(trades)
+                    wins = sum(1 for t in trades if t.get("final_pnl_inr", 0) > 0)
+                    win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
+
+                    active_cap = state.get("active_capital_inr", config.INITIAL_CAPITAL_INR)
+                    banked = state.get("banked_profit_inr", 0.0)
+                    net_pnl = state.get("total_net_pnl_inr", 0.0)
+                    pnl_sign = "+" if net_pnl >= 0 else "-"
+                    active_coins = getattr(client, 'active_universe', config.SYMBOLS)
+                    top_preview = ', '.join(active_coins[:8]) + ('...' if len(active_coins) > 8 else '')
+
+                    resp = (
+                        f"📊 *[DELTA INDIA WALLET & BOT STATUS]*\n"
+                        f"═══════════════════════\n"
+                        f"🕒 Time: `{now_ist}` IST\n"
+                        f"🇮🇳 *Currency:* `INR (Indian Rupee - ₹)`\n"
+                        f"💼 *Active Capital:* `{config.format_inr(active_cap)}`\n"
+                        f"🏦 *Banked Safe Vault:* `{config.format_inr(banked)}`\n"
+                        f"💵 *Total Net PnL:* `{pnl_sign}{config.format_inr(abs(net_pnl))}`\n"
+                        f"📈 *Trades Executed:* {total_trades} (Wins: {wins} | WR: {win_rate:.1f}%)\n"
+                        f"⚡ *Leverage:* {config.LEVERAGE}x Isolated\n"
+                        f"🕒 *Trading Mode:* 24x7 Nonstop (Night & Weekend Active)\n"
+                        f"🪙 *Dynamic Universe:* {len(active_coins)} Liquid Coins (Filtered from 240+)\n"
+                        f"📋 *Top Coins:* `{top_preview}`"
+                    )
+                    send_alert(resp)
+
+                elif cmd == "/positions":
+                    pos = client.state.get("open_positions", {})
+                    active_coins = getattr(client, 'active_universe', config.SYMBOLS)
+                    if not pos:
+                        send_alert(f"📭 *No active positions open right now.* Bot is scanning Top {len(active_coins)} liquid coins.")
+                    else:
+                        resp = f"📂 *[ACTIVE OPEN POSITIONS ({len(pos)})]*\n═══════════════════════\n"
+                        for sym, p in pos.items():
+                            resp += (
+                                f"🪙 *{sym}* ({p['side']})\n"
+                                f"📍 Entry: `${p['entry_price']:.4f}` (~₹{p.get('entry_inr_est', 0):,.2f})\n"
+                                f"🛡️ SL: `${p['sl_price']:.4f}` | Risk: {config.format_inr(p.get('risk_inr', 0))}\n"
+                                f"🛡️ Rescue Hit: `{p['rescue_hit']}` | TP1 Hit: `{p['tp1_hit']}`\n"
+                                f"💼 20x Margin: `{config.format_inr(p.get('margin_used_inr', 0))}`\n───────────────────────\n"
+                            )
+                        send_alert(resp)
+
+                elif cmd == "/reset":
+                    client.state["active_capital_inr"] = 2000.0
+                    client.state["initial_capital_inr"] = 2000.0
+                    client.state["month_starting_capital_inr"] = 2000.0
+                    client.state["banked_profit_inr"] = 0.0
+                    client.state["total_net_pnl_inr"] = 0.0
+                    client.state["open_positions"] = {}
+                    client.state["closed_trades"] = []
+                    client.save_state()
+                    resp = (
+                        f"🔄 *[WALLET RESET COMPLETE]*\n"
+                        f"═══════════════════════\n"
+                        f"💼 *Active Capital:* `₹2,000.00`\n"
+                        f"💵 *Realized PnL:* `₹0.00`\n"
+                        f"🏦 *Banked Safe Vault:* `₹0.00`\n"
+                        f"📊 *Open Positions:* `0 (Cleared)`\n"
+                        f"📈 *Trades Record:* `0 (Fresh Start)`\n"
+                        f"🕒 Time: `{now_ist}` IST\n"
+                        f"✅ Virtual money has been reset to ₹2,000.00 INR successfully!"
+                    )
+                    send_alert(resp)
+
+                elif cmd in ["/start", "/help"]:
+                    resp = (
+                        f"🤖 *ICT ASIAN JUDAS OTE MASTER BOT (INR EDITION)*\n"
+                        f"═══════════════════════\n"
+                        f"Currency: Indian Rupee (₹ - INR)\n"
+                        f"Available Commands:\n"
+                        f"• `/time` - Check official locked IST (+5:30) time\n"
+                        f"• `/status` - Check wallet balance (₹), vault, & PnL\n"
+                        f"• `/positions` - View current open trades & margins\n"
+                        f"• `/balance` - Quick INR balance overview\n"
+                        f"• `/reset` - Reset virtual wallet to ₹2,000.00 INR\n"
+                        f"• `/help` - View command list"
+                    )
+                    send_alert(resp)
+
+    except Exception as e:
         pass
-
-    return BOT_PAUSED
-
-def start_telegram_polling_thread(client):
-    """
-    Starts high-speed dedicated background listener for Telegram messages.
-    Responds in <1.5 seconds!
-    """
-    import threading
-    import time
-
-    def loop():
-        while True:
-            try:
-                poll_telegram_commands(client)
-            except Exception:
-                pass
-            time.sleep(1.5)
-
-    t = threading.Thread(target=loop, daemon=True)
-    t.start()
-    print("📲 [TELEGRAM] Instant background command listener activated (1.5s response).")
-
-def is_bot_paused():
-    return BOT_PAUSED

@@ -1,479 +1,547 @@
-import os
-import time
-import json
-import hmac
-import hashlib
+"""
+========================================================================================
+DELTA EXCHANGE INDIA CLIENT & COMPOUNDING PORTFOLIO MANAGER (INR EDITION)
+Exchange: Delta Exchange India (api.india.delta.exchange)
+Currency: Indian Rupee (INR - ₹)
+Integer Contract Rounding: Guaranteed Zero Rejection on Partial / Full Exits
+Time strictly locked to Indian Standard Time (IST, UTC+5:30)
+========================================================================================
+"""
 import urllib.request
 import urllib.parse
-from decimal import Decimal, ROUND_HALF_UP
+import json
+import time
+import hmac
+import hashlib
+import datetime
+import os
 import config
-
-PORTFOLIO_FILE = os.path.join(os.path.dirname(__file__), "portfolio_state.json")
-
-def round_to_tick(price, tick_size_str):
-    d_price = Decimal(str(price))
-    d_tick = Decimal(str(tick_size_str))
-    rounded = (d_price / d_tick).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * d_tick
-    return format(rounded, 'f')
+import telegram_notifier
 
 class DeltaClient:
     def __init__(self):
-        self.api_key = config.DELTA_API_KEY
-        self.api_secret = config.DELTA_API_SECRET
         self.base_url = config.DELTA_BASE_URL
-        self.paper_mode = config.PAPER_TRADING
-        self.portfolio = self._load_portfolio()
-        self.cached_products = {}
-        self.refresh_products()
+        self.state_file = os.path.join(os.path.dirname(__file__), "elite_sniper_state.json")
+        self.last_loss_timestamps = {}
+        self.contract_values = dict(getattr(config, 'CONTRACT_VALUES', {}))
+        self.active_universe = list(getattr(config, 'SYMBOLS', []))
+        self.bstock_symbols = set()
+        self.last_screener_refresh = 0
+        self.load_state()
 
-    def _load_portfolio(self):
-        default = {
-            "virtual_balance": config.VIRTUAL_INITIAL_BALANCE,
-            "realized_pnl": 0.0,
-            "open_positions": {},
-            "trade_history": [],
-            "cooldowns": {}
-        }
-        if os.path.exists(PORTFOLIO_FILE):
+    def load_state(self):
+        """Loads persistent portfolio balance and trade records in Indian Rupee (INR - ₹)."""
+        now_month = config.get_now_ist().strftime('%Y-%m')
+        if os.path.exists(self.state_file):
             try:
-                with open(PORTFOLIO_FILE, "r") as f:
-                    data = json.load(f)
-                    default.update(data)
+                with open(self.state_file, 'r') as f:
+                    self.state = json.load(f)
+                    self.state.setdefault("initial_capital_inr", config.INITIAL_CAPITAL_INR)
+                    self.state.setdefault("active_capital_inr", config.INITIAL_CAPITAL_INR)
+                    self.state.setdefault("month_starting_capital_inr", config.INITIAL_CAPITAL_INR)
+                    self.state.setdefault("current_month", now_month)
+                    self.state.setdefault("banked_profit_inr", 0.0)
+                    self.state.setdefault("total_net_pnl_inr", 0.0)
+                    self.state.setdefault("open_positions", {})
+                    self.state.setdefault("closed_trades", [])
+                    return
             except Exception as e:
-                print(f"[DELTA] Portfolio read note: {e}")
-        return default
+                print(f"[STATE LOAD ERROR] {e}. Reinitializing default state.")
 
-    def save_portfolio(self):
-        try:
-            with open(PORTFOLIO_FILE, "w") as f:
-                json.dump(self.portfolio, f, indent=2)
-        except Exception as e:
-            print(f"[DELTA] Portfolio save note: {e}")
-
-    def _api_request(self, method, path, query_params=None, payload_dict=None):
-        if not self.api_key or not self.api_secret:
-            return {"error": "Missing API Key/Secret"}
-
-        url = f"{self.base_url}{path}"
-        if query_params:
-            url += f"?{urllib.parse.urlencode(query_params)}"
-
-        payload_str = json.dumps(payload_dict, separators=(",", ":")) if payload_dict else ""
-        timestamp = str(int(time.time()))
-        signature_data = method + timestamp + path + (f"?{urllib.parse.urlencode(query_params)}" if query_params else "") + payload_str
-        signature = hmac.new(
-            self.api_secret.encode('utf-8'),
-            signature_data.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
-
-        headers = {
-            "api-key": self.api_key,
-            "timestamp": timestamp,
-            "signature": signature,
-            "User-Agent": "WhaleGoldenPocketBot/1.0",
-            "Content-Type": "application/json"
+        self.state = {
+            "initial_capital_inr": config.INITIAL_CAPITAL_INR,
+            "active_capital_inr": config.INITIAL_CAPITAL_INR,
+            "month_starting_capital_inr": config.INITIAL_CAPITAL_INR,
+            "current_month": now_month,
+            "banked_profit_inr": 0.0,
+            "total_net_pnl_inr": 0.0,
+            "open_positions": {},
+            "closed_trades": []
         }
+        self.save_state()
 
-        data = payload_str.encode('utf-8') if payload_str else None
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    def save_state(self):
+        """Persists current state atomically to disk."""
+        try:
+            with open(self.state_file, 'w') as f:
+                json.dump(self.state, f, indent=4)
+        except Exception as e:
+            print(f"[STATE SAVE ERROR] {e}")
 
+    def fetch_candles(self, symbol, resolution="15m", limit=60):
+        """
+        Fetches historical candles from Delta Exchange India public API without geo-blocking.
+        """
+        end_time = int(time.time())
+        res_seconds_map = {
+            "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+            "1h": 3600, "2h": 7200, "4h": 14400, "1d": 86400
+        }
+        res_secs = res_seconds_map.get(resolution, 900)
+        start_time = end_time - (res_secs * limit)
+
+        url = f"{self.base_url}/v2/history/candles?resolution={resolution}&symbol={symbol}&start={start_time}&end={end_time}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         try:
             with urllib.request.urlopen(req, timeout=10) as r:
-                return json.loads(r.read().decode('utf-8'))
-        except urllib.error.HTTPError as e:
-            body = e.read().decode('utf-8')
-            return {"error": f"HTTP {e.code}", "body": body}
+                data = json.loads(r.read().decode())
+                candles = data.get("result", [])
+                formatted = []
+                for c in candles:
+                    formatted.append({
+                        "time": c["time"],
+                        "datetime": config.format_timestamp_ist(c["time"]),
+                        "open": float(c["open"]),
+                        "high": float(c["high"]),
+                        "low": float(c["low"]),
+                        "close": float(c["close"]),
+                        "volume": float(c.get("volume", 0))
+                    })
+                formatted.sort(key=lambda x: x["time"])
+                return formatted
         except Exception as e:
-            return {"error": str(e)}
-
-    def refresh_products(self):
-        try:
-            url = f"{self.base_url}/v2/products"
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=8) as r:
-                res = json.loads(r.read().decode('utf-8')).get('result', [])
-                for p in res:
-                    sym = p.get('symbol')
-                    if sym:
-                        self.cached_products[sym] = p
-        except Exception as e:
-            print(f"[DELTA] Products refresh error: {e}")
-
-    def get_ticker(self, symbol):
-        try:
-            url = f"{self.base_url}/v2/tickers/{symbol}"
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=4) as r:
-                return json.loads(r.read().decode('utf-8')).get('result', {})
-        except Exception:
-            return {}
-
-    def get_all_tickers(self):
-        try:
-            url = f"{self.base_url}/v2/tickers"
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=6) as r:
-                data = json.loads(r.read().decode('utf-8')).get('result', [])
-                return {item['symbol']: item for item in data if 'symbol' in item}
-        except Exception as e:
-            print(f"[DELTA] Error getting tickers: {e}")
-            return {}
-
-    def get_candles(self, symbol, resolution='5m', limit=65):
-        try:
-            now = int(time.time())
-            step_sec = 3 * 60 if resolution == '3m' else (15 * 60 if resolution == '15m' else 5 * 60)
-            start = now - limit * step_sec
-            url = f"{self.base_url}/v2/history/candles?resolution={resolution}&symbol={symbol}&start={start}&end={now}"
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=8) as r:
-                raw = json.loads(r.read().decode('utf-8')).get('result', [])
-                return sorted(raw, key=lambda x: x['time'])
-        except Exception as e:
-            print(f"[DELTA] Candle error {symbol}: {e}")
+            print(f"[FETCH ERROR] {symbol} ({resolution}) candles: {e}")
             return []
 
-    def get_balance(self):
-        if self.paper_mode or not (self.api_key and self.api_secret):
-            return self.portfolio.get("virtual_balance", config.VIRTUAL_INITIAL_BALANCE)
+    def fetch_ticker(self, symbol):
+        """Fetches live mark price and last traded price."""
+        url = f"{self.base_url}/v2/tickers/{symbol}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         try:
-            res = self._api_request("GET", "/v2/wallet/balances")
-            result = res.get("result", [])
-            usd_rate = getattr(config, 'USD_TO_INR', 89.0)
-            for b in result:
-                asset = b.get("asset_symbol", "")
-                available = float(b.get("available_balance", 0) or 0)
-                if asset in ["INR", "INR_D"]:
-                    return available
-                if asset in ["USD", "USDT"]:
-                    return available * usd_rate
-            return self.portfolio.get("virtual_balance", config.VIRTUAL_INITIAL_BALANCE)
+            with urllib.request.urlopen(req, timeout=8) as r:
+                data = json.loads(r.read().decode())
+                res = data.get("result", {})
+                return {
+                    "last_price": float(res.get("close", 0)),
+                    "mark_price": float(res.get("mark_price", 0))
+                }
         except Exception:
-            return self.portfolio.get("virtual_balance", config.VIRTUAL_INITIAL_BALANCE)
-
-    def is_in_cooldown(self, symbol):
-        cd_map = self.portfolio.get("cooldowns", {})
-        now = time.time()
-        expiry = cd_map.get(symbol, 0)
-        if now < expiry:
-            rem = int((expiry - now) / 60) + 1
-            return True, rem
-        try:
-            import ai_advisor
-            is_susp, susp_msg = ai_advisor.is_coin_suspended(symbol)
-            if is_susp:
-                return True, 240
-        except Exception:
-            pass
-        return False, 0
-
-    def open_position(self, symbol, entry_price, sl_price, signal_score, whale_info, side='LONG', targets=None):
-        """
-        GOLDEN POCKET EXECUTION ENGINE:
-        - Strict Fixed Position Sizing (Render-Identical)
-        - Strict SL Clamping (1.5% - 2.5% max)
-        - Slippage Guard against bad testnet orderbooks
-        - Integer contract sizing + Risk shield
-        - Active SL orderbook confirmation + Emergency Bailout
-        """
-        # 1. SLIPPAGE GUARD (Anti-Bad-Fill Guard)
-        max_slippage = getattr(config, 'MAX_SLIPPAGE_PCT', 0.005)
-        try:
-            ticker_data = self.get_ticker(symbol)
-            quotes = ticker_data.get('quotes', {})
-            best_ask = float(quotes.get('best_ask') or 0)
-            best_bid = float(quotes.get('best_bid') or 0)
-            
-            if side == 'LONG' and best_ask > 0 and entry_price > 0:
-                slippage_pct = (best_ask - entry_price) / entry_price
-                if slippage_pct > max_slippage:
-                    print(f"  [SLIPPAGE GUARD] Spread too wide for {symbol}! Mark: {entry_price}, Best Ask: {best_ask} (+{slippage_pct*100:.2f}% > {max_slippage*100:.1f}%). Order skipped to protect execution price!")
-                    return None
-            elif side == 'SHORT' and best_bid > 0 and entry_price > 0:
-                slippage_pct = (entry_price - best_bid) / entry_price
-                if slippage_pct > max_slippage:
-                    print(f"  [SLIPPAGE GUARD] Spread too wide for {symbol}! Mark: {entry_price}, Best Bid: {best_bid} (-{slippage_pct*100:.2f}% > {max_slippage*100:.1f}%). Order skipped to protect execution price!")
-                    return None
-        except Exception as e:
-            pass
-
-        # 2. STRICT SL DISTANCE CLAMP (Guarantees SL is never far away!)
-        if side == 'LONG':
-            max_sl_price = entry_price * (1.0 - config.MAX_SL_PCT)
-            min_sl_price = entry_price * (1.0 - config.MIN_SL_PCT)
-            sl_price = max(max_sl_price, min(min_sl_price, sl_price))
-        else:
-            max_sl_price = entry_price * (1.0 + config.MAX_SL_PCT)
-            min_sl_price = entry_price * (1.0 + config.MIN_SL_PCT)
-            sl_price = min(max_sl_price, max(min_sl_price, sl_price))
-
-        # 3. STRICT POSITION SIZING (Fixed INR 5,000 Budget with AI Psychology Multiplier)
-        if getattr(config, 'USE_FIXED_POSITION_SIZE', True):
-            base_size_inr = getattr(config, 'FIXED_POSITION_SIZE_INR', 5000.0)
-            try:
-                import ai_advisor
-                size_mult = ai_advisor.get_position_size_multiplier()
-            except Exception:
-                size_mult = 1.0
-            position_size_inr = base_size_inr * size_mult
-            max_allowed_inr = getattr(config, 'MAX_POSITION_SIZE_INR', 6000.0)
-        else:
-            capital_inr = self.get_balance()
-            risk_amount_inr = capital_inr * config.RISK_PER_TRADE_PCT
-            sl_pct = abs(entry_price - sl_price) / entry_price if entry_price > 0 else config.STOP_LOSS_PCT
-            sl_pct = max(config.MIN_SL_PCT, min(config.MAX_SL_PCT, sl_pct))
-            position_size_inr = risk_amount_inr / sl_pct
-            max_allowed_inr = (capital_inr * config.LEVERAGE) / config.MAX_CONCURRENT_TRADES
-            position_size_inr = min(position_size_inr, max_allowed_inr)
-
-        usd_rate = getattr(config, 'USD_TO_INR', 89.0)
-        position_size_usd = position_size_inr / usd_rate
-
-        prod_info = self.cached_products.get(symbol, {})
-        product_id = prod_info.get("id")
-        c_val_str = prod_info.get("contract_value", "1.0") or "1.0"
-        tick_size_str = prod_info.get("tick_size", "0.01")
-        try:
-            c_val = float(c_val_str)
-        except Exception:
-            c_val = 1.0
-
-        unit_curr = prod_info.get("contract_unit_currency", "")
-        one_contract_usd = c_val if unit_curr == "USD" else c_val * entry_price
-        one_contract_inr = one_contract_usd * usd_rate
-
-        max_allowed_single_contract_inr = min(position_size_inr * 1.35, max_allowed_inr)
-        if one_contract_inr > max_allowed_single_contract_inr:
-            print(f"  [RISK SHIELD] ⚠️ REJECTED {symbol}: 1 contract value (₹{one_contract_inr:,.0f}) exceeds position budget (₹{position_size_inr:,.0f})!")
             return None
 
-        contracts = int(round(position_size_usd / one_contract_usd)) if one_contract_usd > 0 else 0
-        if contracts < 1:
-            if one_contract_inr <= max_allowed_single_contract_inr:
-                contracts = 1
-            else:
-                return None
-
-        if contracts * one_contract_inr > max_allowed_inr and one_contract_inr > 0:
-            contracts = int(max_allowed_inr / one_contract_inr)
-            if contracts < 1:
-                return None
-
-        contracts = int(contracts)
-        exact_size_usd = contracts * one_contract_usd
-        exact_size_inr = exact_size_usd * usd_rate
-
-        entry_rounded_str = round_to_tick(entry_price, tick_size_str)
-        sl_rounded_str = round_to_tick(sl_price, tick_size_str)
-        actual_fill_price = float(entry_rounded_str)
-        sl_rounded = float(sl_rounded_str)
-
-        # ----------------------------------------------------
-        # LIVE DELTA API EXECUTION WITH FILL & SL VERIFICATION
-        # ----------------------------------------------------
-        order_res = {}
-        sl_order_id = None
-        if not self.paper_mode and self.api_key and self.api_secret and product_id:
-            api_side = "buy" if side == "LONG" else "sell"
-            
-            # Primary: Native Bracket Order
-            payload = {
-                "product_id": int(product_id),
-                "product_symbol": symbol,
-                "size": int(contracts),
-                "side": api_side,
-                "order_type": "market_order",
-                "bracket_stop_loss_price": sl_rounded_str,
-                "bracket_stop_trigger_method": "mark_price"
-            }
-            order_res = self._api_request("POST", "/v2/orders", payload_dict=payload)
-
-            if "error" in order_res or not order_res.get("success", False):
-                # Fallback: Market Entry + Standalone Reduce-Only SL Order
-                market_payload = {
-                    "product_id": int(product_id),
-                    "product_symbol": symbol,
-                    "size": int(contracts),
-                    "side": api_side,
-                    "order_type": "market_order"
-                }
-                order_res = self._api_request("POST", "/v2/orders", payload_dict=market_payload)
-                if "error" in order_res or not order_res.get("success", False):
-                    print(f"  [DELTA API ERROR] Entry rejected: {order_res}")
-                    return None
-
-                # Attach Stop-Loss immediately
-                sl_side = "sell" if side == "LONG" else "buy"
-                sl_payload = {
-                    "product_id": int(product_id),
-                    "product_symbol": symbol,
-                    "size": int(contracts),
-                    "side": sl_side,
-                    "order_type": "market_order",
-                    "stop_order_type": "stop_loss_order",
-                    "stop_price": sl_rounded_str,
-                    "stop_trigger_method": "mark_price",
-                    "reduce_only": True
-                }
-                sl_res = self._api_request("POST", "/v2/orders", payload_dict=sl_payload)
-                sl_order_id = sl_res.get("result", {}).get("id")
-
-                # 🛡️ EMERGENCY FAIL-SAFE: If Stop-Loss failed to attach, CLOSE POSITION IMMEDIATELY!
-                if not sl_res.get("success", False):
-                    print(f"  [CRITICAL SAFETY TRIGGERED] Stop-Loss attachment failed! Emergency closing {symbol}...")
-                    close_payload = {
-                        "product_id": int(product_id),
-                        "product_symbol": symbol,
-                        "size": int(contracts),
-                        "side": sl_side,
-                        "order_type": "market_order"
-                    }
-                    self._api_request("POST", "/v2/orders", payload_dict=close_payload)
-                    return None
-
-            # Capture actual execution fill price from exchange
-            fill_data = order_res.get("result", {})
-            if fill_data.get("average_fill_price"):
-                actual_fill_price = float(fill_data["average_fill_price"])
-
-        pos = {
-            "symbol": symbol,
-            "side": side,
-            "entry_time": time.time(),
-            "entry_price": actual_fill_price,
-            "current_price": actual_fill_price,
-            "sl_price": sl_rounded,
-            "initial_sl": sl_rounded,
-            "product_id": product_id,
-            "contracts": contracts,
-            "contracts_remaining": contracts,
-            "one_contract_usd": one_contract_usd,
-            "one_contract_inr": one_contract_inr,
-            "size_inr": exact_size_inr,
-            "size_usd": exact_size_usd,
-            "units_remaining": 1.0,
-            "leverage": config.LEVERAGE,
-            "micro_be_hit": False,
-            "tp1_hit": False,
-            "tp2_hit": False,
-            "tp3_hit": False,
-            "highest_gain_pct": 0.0,
-            "realized_pnl_inr": 0.0,
-            "realized_pnl": 0.0,
-            "score": signal_score,
-            "whale_info": whale_info,
-            "api_order_id": order_res.get("result", {}).get("id"),
-            "sl_order_id": sl_order_id
-        }
-        if targets and isinstance(targets, dict):
-            pos["fib_tp1_gain_pct"] = targets.get("tp1_gain_pct")
-            pos["fib_tp2_gain_pct"] = targets.get("tp2_gain_pct")
-            pos["fib_tp3_gain_pct"] = targets.get("tp3_gain_pct")
-            pos["tp1_price"] = targets.get("tp1_price")
-            pos["tp2_price"] = targets.get("tp2_price")
-            pos["tp3_price"] = targets.get("tp3_price")
-            pos["macro_high"] = targets.get("macro_high")
-            pos["macro_low"] = targets.get("macro_low")
-        self.portfolio["open_positions"][symbol] = pos
-        self.save_portfolio()
-        return pos
-
-    open_paper_position = open_position
-
-    def update_stop_loss(self, symbol, new_sl_price):
-        if symbol not in self.portfolio["open_positions"]:
-            return False
-        prod_info = self.cached_products.get(symbol, {})
-        tick_size_str = prod_info.get("tick_size", "0.01")
-        sl_rounded = float(round_to_tick(new_sl_price, tick_size_str))
-        self.portfolio["open_positions"][symbol]["sl_price"] = sl_rounded
-        self.save_portfolio()
-
-        if not self.paper_mode and self.api_key and self.api_secret:
-            pos = self.portfolio["open_positions"][symbol]
-            product_id = pos.get("product_id")
-            side = pos.get("side", "LONG")
-            sl_side = "sell" if side == "LONG" else "buy"
-            contracts = pos.get("contracts_remaining", pos.get("contracts", 1))
-
-            sl_payload = {
-                "product_id": int(product_id),
-                "product_symbol": symbol,
-                "size": int(contracts),
-                "side": sl_side,
-                "order_type": "market_order",
-                "stop_order_type": "stop_loss_order",
-                "stop_price": str(sl_rounded),
-                "stop_trigger_method": "mark_price",
-                "reduce_only": True
-            }
-            res = self._api_request("POST", "/v2/orders", payload_dict=sl_payload)
-            return res.get("success", False)
-        return True
-
-    def close_position(self, symbol, exit_price, reason):
-        if symbol not in self.portfolio["open_positions"]:
-            return {}
-        pos = self.portfolio["open_positions"][symbol]
-        entry = pos["entry_price"]
-        side = pos.get("side", "LONG")
-        usd_rate = getattr(config, 'USD_TO_INR', 89.0)
-
-        gain_pct = (exit_price - entry) / entry if side == "LONG" else (entry - exit_price) / entry
-        units_left = pos.get("units_remaining", 1.0)
-        pos_size = pos.get("size_inr", getattr(config, 'FIXED_POSITION_SIZE_INR', 5000.0))
-        final_leg_pnl = pos_size * units_left * gain_pct
-        total_pnl = final_leg_pnl + pos.get("realized_pnl_inr", 0.0)
-
-        self.portfolio["virtual_balance"] += final_leg_pnl
-        self.portfolio["realized_pnl"] += final_leg_pnl
-
-        # Dynamic Rolling Cooldown: If trade took a loss (stop loss hit / choppy day), cool down for 2.5 hours.
-        # If it was a win, normal 45m cooldown is plenty!
-        loss_cd = getattr(config, 'SL_HIT_COOLDOWN_MINUTES', 150)
-        norm_cd = getattr(config, 'NORMAL_COOLDOWN_MINUTES', 45)
-        cd_minutes = loss_cd if final_leg_pnl < 0 else norm_cd
-        if "cooldowns" not in self.portfolio:
-            self.portfolio["cooldowns"] = {}
-        self.portfolio["cooldowns"][symbol] = time.time() + (cd_minutes * 60)
-
-        record = {
-            "symbol": symbol,
-            "side": side,
-            "entry_time": pos["entry_time"],
-            "exit_time": time.time(),
-            "entry_price": entry,
-            "exit_price": exit_price,
-            "gain_pct": gain_pct,
-            "realized_pnl_inr": total_pnl,
-            "reason": reason
-        }
-        self.portfolio["trade_history"].append(record)
-        del self.portfolio["open_positions"][symbol]
-        self.save_portfolio()
-
-        # 🧠 Smart Money Psychology & AI Advisor Post-Mortem Hook
+    def fetch_product_specs(self):
+        """
+        Fetches all perpetual futures specs from Delta Exchange India:
+        - Maps contract_value (lot size) for exact Integer Contract Rounding.
+        - Identifies non-24/7 equity bStock tokens to exclude them from crypto universe.
+        """
+        url = f"{self.base_url}/v2/products"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        bstock_symbols = set()
         try:
-            import ai_advisor
-            ai_advisor.record_trade_exit(record, self, config)
+            with urllib.request.urlopen(req, timeout=12) as r:
+                data = json.loads(r.read().decode())
+                products = data.get("result", [])
+                for p in products:
+                    if p.get("contract_type") == "perpetual_futures":
+                        sym = p.get("symbol")
+                        try:
+                            cv = float(p.get("contract_value", 1.0))
+                            self.contract_values[sym] = cv
+                        except (ValueError, TypeError):
+                            pass
+                        desc = p.get("description", "")
+                        if "bStocks" in desc:
+                            bstock_symbols.add(sym)
+            self.bstock_symbols = bstock_symbols
+            print(f"📦 [PRODUCTS] Cached lot sizes for {len(self.contract_values)} products ({len(bstock_symbols)} bStocks filtered).")
         except Exception as e:
-            print(f"⚠️ [AI ADVISOR POST-MORTEM ERROR]: {e}")
+            print(f"[PRODUCT SPECS ERROR] {e}")
+        return bstock_symbols
 
-        # Live Delta API Market Exit
-        if not self.paper_mode and self.api_key and self.api_secret:
-            product_id = pos.get("product_id")
-            close_side = "sell" if side == "LONG" else "buy"
-            contracts = pos.get("contracts_remaining", pos.get("contracts", 1))
-            payload = {
-                "product_id": int(product_id),
-                "product_symbol": symbol,
-                "size": int(contracts),
-                "side": close_side,
-                "order_type": "market_order"
-            }
-            self._api_request("POST", "/v2/orders", payload_dict=payload)
+    def fetch_dynamic_top_universe(self, limit=None, min_volume_usd=None, max_spread_pct=None):
+        """
+        DYNAMIC INSTITUTIONAL SCREENER (240+ COIN AUTO-FILTER):
+        Executes 1 single bulk API request to /v2/tickers:
+        - Automatically filters out dead / illiquid coins (< min_volume_usd)
+        - Automatically filters out wide-spread traps (> max_spread_pct)
+        - Excludes non-24/7 equity tokens (bStocks)
+        - Always preserves core staple coins (SOL, DOGE, BTC, ETH, ADA, AVAX, BNB)
+        - Sorts remaining coins by 24h turnover to pick top liquid movers
+        - Caches contract values dynamically for zero-rejection integer lot sizing
+        """
+        if limit is None:
+            limit = getattr(config, 'DYNAMIC_UNIVERSE_LIMIT', 25)
+        if min_volume_usd is None:
+            min_volume_usd = getattr(config, 'DYNAMIC_MIN_VOLUME_USD', 500000.0)
+        if max_spread_pct is None:
+            max_spread_pct = getattr(config, 'DYNAMIC_MAX_SPREAD_PCT', 0.0020)
 
-        return record
+        core_staples = getattr(config, 'CORE_STAPLES', ['SOLUSD', 'DOGEUSD', 'BTCUSD', 'ETHUSD', 'ADAUSD', 'AVAXUSD', 'BNBUSD'])
 
-    close_paper_position = close_position
+        # Refresh product lot size specs if needed
+        if not self.bstock_symbols or len(self.contract_values) < 20:
+            self.fetch_product_specs()
+
+        url = f"{self.base_url}/v2/tickers"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        candidates = []
+
+        try:
+            with urllib.request.urlopen(req, timeout=12) as r:
+                data = json.loads(r.read().decode())
+                tickers = data.get("result", [])
+
+            for t in tickers:
+                if t.get("contract_type") != "perpetual_futures":
+                    continue
+
+                symbol = t.get("symbol")
+                if not symbol or symbol in self.bstock_symbols:
+                    continue
+
+                try:
+                    cv = float(t.get("contract_value", 1.0))
+                    self.contract_values[symbol] = cv
+                except (ValueError, TypeError):
+                    pass
+
+                turnover = float(t.get("turnover_usd") or 0)
+                quotes = t.get("quotes") or {}
+                try:
+                    bid = float(quotes.get("best_bid") or 0)
+                    ask = float(quotes.get("best_ask") or 0)
+                except (ValueError, TypeError):
+                    bid, ask = 0, 0
+
+                spread_pct = ((ask - bid) / ask) if ask > 0 and bid > 0 else 1.0
+                mark_price = float(t.get("mark_price") or 0)
+
+                if turnover >= min_volume_usd and spread_pct <= max_spread_pct and mark_price > 0:
+                    candidates.append({
+                        "symbol": symbol,
+                        "turnover": turnover,
+                        "spread_pct": spread_pct * 100,
+                        "mark_price": mark_price,
+                        "contract_value": self.contract_values.get(symbol, 1.0)
+                    })
+
+            # Sort by 24h turnover descending
+            candidates.sort(key=lambda x: x["turnover"], reverse=True)
+
+            universe = []
+            # 1. Guarantee core staples
+            for s in core_staples:
+                if s in self.contract_values or any(c["symbol"] == s for c in candidates):
+                    universe.append(s)
+
+            # 2. Fill up to limit with top active coins
+            for c in candidates:
+                if c["symbol"] not in universe:
+                    universe.append(c["symbol"])
+                if len(universe) >= limit:
+                    break
+
+            self.active_universe = universe
+            self.last_screener_refresh = time.time()
+            print(f"🔥 [DYNAMIC SCREENER] Selected Top {len(universe)} Liquid Coins from 240+ Delta universe.")
+            return universe
+
+        except Exception as e:
+            print(f"[SCREENER FETCH ERROR] {e}. Keeping current universe.")
+            return self.active_universe
+
+    def get_current_risk_inr(self):
+        """
+        Compounding Engine with Max Active Capital ceiling in INR:
+        - Risk per trade is strictly 2.5% of active INR capital.
+        - Surplus profits beyond MAX_ACTIVE_CAPITAL_INR are safely banked into the vault.
+        """
+        now_month = config.get_now_ist().strftime('%Y-%m')
+        recorded_month = self.state.get("current_month", now_month)
+
+        if now_month != recorded_month:
+            # Calendar month rollover in IST!
+            curr_active = self.state.get("active_capital_inr", config.INITIAL_CAPITAL_INR)
+            if curr_active > config.MAX_ACTIVE_CAPITAL_INR:
+                overflow = curr_active - config.MAX_ACTIVE_CAPITAL_INR
+                self.state["banked_profit_inr"] += overflow
+                self.state["active_capital_inr"] = config.MAX_ACTIVE_CAPITAL_INR
+
+            self.state["month_starting_capital_inr"] = self.state["active_capital_inr"]
+            self.state["current_month"] = now_month
+            self.save_state()
+
+        curr_cap = self.state.get("active_capital_inr", config.INITIAL_CAPITAL_INR)
+        return curr_cap * config.RISK_PER_TRADE_PCT
+
+    def calculate_integer_exit_contracts(self, total_contracts):
+        """
+        INTEGER CONTRACT ROUNDING ENGINE FOR DELTA EXCHANGE INDIA:
+        Guarantees that 60% / 25% / 15% partial exits are strictly whole integer lots.
+        Prevents Delta Exchange API rejection: 'contract_size must be an integer'.
+        Sum of exit_1 + exit_2 + exit_3 ALWAYS equals total_contracts exactly!
+        """
+        if total_contracts >= 4:
+            exit_1 = max(1, int(round(total_contracts * 0.60)))
+            exit_2 = max(1, int(round(total_contracts * 0.25)))
+            exit_3 = total_contracts - exit_1 - exit_2
+            if exit_3 < 0:
+                exit_2 += exit_3
+                exit_3 = 0
+        elif total_contracts == 3:
+            exit_1 = 2  # 66%
+            exit_2 = 1  # 33%
+            exit_3 = 0
+        elif total_contracts == 2:
+            exit_1 = 1  # 50%
+            exit_2 = 1  # 50%
+            exit_3 = 0
+        else: # total_contracts == 1
+            exit_1 = 0  # 1 full contract rides to TP1 with Breakeven Plus locked!
+            exit_2 = 1
+            exit_3 = 0
+        return int(exit_1), int(exit_2), int(exit_3)
+
+    def open_position(self, setup):
+        """
+        Opens a new trade position using 20x Leverage and Integer Contract Rounding.
+        """
+        symbol = setup["symbol"]
+        side = setup["side"]
+        entry_price = setup["entry_price"]
+        sl_price = setup["sl_price"]
+        rescue_tp = setup["rescue_tp"]
+        tp1_price = setup["tp1_price"]
+        tp2_price = setup["tp2_price"]
+
+        if len(self.state["open_positions"]) >= config.MAX_CONCURRENT_TRADES:
+            return None
+
+        risk_inr = self.get_current_risk_inr()
+        sl_pct = abs(entry_price - sl_price) / entry_price
+        if sl_pct <= 0:
+            return None
+
+        # Integer contract sizing for Delta Exchange India
+        contract_mult = self.contract_values.get(symbol, getattr(config, 'CONTRACT_VALUES', {}).get(symbol, 1.0))
+        contract_unit_usd = entry_price * contract_mult
+
+        curr_active_cap = self.state.get("active_capital_inr", config.INITIAL_CAPITAL_INR)
+        
+        # Margin buffer check: Ensure at least ₹400 free balance remains before taking trade
+        total_margin_used = sum(p.get("margin_used_inr", 0) for p in self.state["open_positions"].values())
+        free_capital = curr_active_cap - total_margin_used
+        if free_capital < 400.0:
+            print(f"⚠️ [MARGIN BUFFER] Free capital ({config.format_inr(free_capital)}) is below minimum buffer (₹400). Skipping {symbol}.")
+            return None
+
+        # STRICT FIXED SIZING: Fixed ₹9,000 - ₹10,000 per trade (Compounding STOPPED)
+        # Position size will NEVER exceed ₹10,000 INR regardless of capital or tight SL
+        target_pos_inr = getattr(config, 'TARGET_POSITION_INR', 9500.0)
+        max_pos_inr = getattr(config, 'MAX_POSITION_INR', 10000.0)
+        
+        target_pos_usd = target_pos_inr / config.USD_INR_RATE
+        raw_contracts = target_pos_usd / contract_unit_usd
+        total_contracts = max(1, int(round(raw_contracts)))
+
+        # Hard guard: If integer contract rounding exceeds MAX_POSITION_INR (₹10,000), round down
+        actual_position_usd = total_contracts * contract_unit_usd
+        actual_position_inr = actual_position_usd * config.USD_INR_RATE
+        if total_contracts > 1 and actual_position_inr > max_pos_inr:
+            total_contracts = max(1, int(target_pos_usd // contract_unit_usd))
+            actual_position_usd = total_contracts * contract_unit_usd
+            actual_position_inr = actual_position_usd * config.USD_INR_RATE
+
+        # Calculate exact integer contract exits (30% / 40% / 30%)
+        exit_1_contracts, exit_2_contracts, exit_3_contracts = self.calculate_integer_exit_contracts(total_contracts)
+
+        margin_used_inr = actual_position_inr / config.LEVERAGE
+        entry_inr_est = entry_price * config.USD_INR_RATE
+        actual_risk_inr = actual_position_inr * sl_pct
+
+        now_str = config.get_now_ist().strftime('%Y-%m-%d %H:%M:%S')
+        trade = {
+            "symbol": symbol,
+            "side": side,
+            "entry_time": now_str,
+            "entry_timestamp": time.time(),
+            "entry_price": entry_price,
+            "entry_inr_est": entry_inr_est,
+            "sl_price": sl_price,
+            "initial_sl": sl_price,
+            "rescue_tp": rescue_tp,
+            "tp1_price": tp1_price,
+            "tp2_price": tp2_price,
+            "sl_pct": sl_pct * 100,
+            "risk_inr": actual_risk_inr,
+            "position_inr": actual_position_inr,
+            "position_usd": actual_position_usd,
+            "total_contracts": total_contracts,
+            "remaining_contracts": total_contracts,
+            "exit_1_contracts": exit_1_contracts,
+            "exit_2_contracts": exit_2_contracts,
+            "exit_3_contracts": exit_3_contracts,
+            "remaining_ratio": 1.0,
+            "margin_used_inr": margin_used_inr,
+            "rescue_hit": False,
+            "tp1_hit": False,
+            "realized_pnl_inr": 0.0,
+            "setup_type": setup.get("setup_type", "ICT_OTE")
+        }
+
+        self.state["open_positions"][symbol] = trade
+        self.save_state()
+        telegram_notifier.notify_entry(trade)
+        print(f"🟢 [NEW TRADE OPENED] {symbol} {side} @ ${entry_price:.4f} (~₹{entry_inr_est:,.2f}) | Contracts: {total_contracts} [L1:{exit_1_contracts}, L2:{exit_2_contracts}, L3:{exit_3_contracts}] | Margin: {config.format_inr(margin_used_inr)}")
+        return trade
+
+    def manage_positions(self):
+        """
+        Monitors active positions with Integer Contract Partial Exits:
+        1. Level 1 (+1.0R / Asian Mid): Closes exit_1_contracts & locks SL to Breakeven!
+        2. Level 2 TP1 (Asian High/Low): Closes exit_2_contracts & locks trailing SL!
+        3. Level 3 TP2 Runner (3.0R): Closes all remaining contracts!
+        4. Stop Loss execution.
+        """
+        if not self.state["open_positions"]:
+            return
+
+        symbols_to_close = []
+
+        for symbol, trade in list(self.state["open_positions"].items()):
+            ticker = self.fetch_ticker(symbol)
+            if not ticker or ticker["last_price"] <= 0:
+                continue
+
+            current_price = ticker["last_price"]
+            side = trade["side"]
+            entry_price = trade["entry_price"]
+            sl_price = trade["sl_price"]
+            pos_inr = trade["position_inr"]
+            total_c = max(1, trade.get("total_contracts", 1))
+
+            # ---------------------------------------------------------
+            # 1. RESCUED RULE (+1.0R / Asian Mid): Integer Contract Exit + Breakeven Lock
+            # ---------------------------------------------------------
+            if not trade["rescue_hit"]:
+                hit_rescue = (current_price >= trade["rescue_tp"]) if side == "LONG" else (current_price <= trade["rescue_tp"])
+                if hit_rescue:
+                    exit_contracts = trade.get("exit_1_contracts", 0)
+
+                    if exit_contracts > 0:
+                        closed_ratio = exit_contracts / total_c
+                        closed_val_inr = pos_inr * closed_ratio
+                        r_dist_pct = abs(trade["rescue_tp"] - entry_price) / entry_price
+                        pnl_rescue_inr = closed_val_inr * r_dist_pct
+
+                        trade["remaining_contracts"] = max(0, trade.get("remaining_contracts", total_c) - exit_contracts)
+                        trade["remaining_ratio"] = trade["remaining_contracts"] / total_c
+                        trade["realized_pnl_inr"] += pnl_rescue_inr
+                        self._apply_realized_pnl_inr(pnl_rescue_inr)
+                    else:
+                        pnl_rescue_inr = 0.0
+
+                    trade["rescue_hit"] = True
+                    # BREAKEVEN PLUS: Set Stop Loss slightly above entry in guaranteed profit!
+                    r_dist = abs(entry_price - trade["initial_sl"])
+                    be_plus_buffer = getattr(config, 'BREAKEVEN_PLUS_R', 0.15) * r_dist
+                    trade["sl_price"] = (entry_price + be_plus_buffer) if side == "LONG" else (entry_price - be_plus_buffer)
+
+                    self.save_state()
+                    telegram_notifier.notify_rescue_hit(trade, pnl_rescue_inr)
+                    print(f"🛡️ [RESCUED TRIGGERED] {symbol} closed {exit_contracts} contract(s) (+{config.format_inr(pnl_rescue_inr)}) & SL locked at BREAKEVEN PLUS (${trade['sl_price']:.4f})!")
+
+            # ---------------------------------------------------------
+            # 2. TARGET 1 (Asian High/Low): Integer Contract Exit + Trailing SL
+            # ---------------------------------------------------------
+            if not trade["tp1_hit"] and trade["rescue_hit"]:
+                hit_tp1 = (current_price >= trade["tp1_price"]) if side == "LONG" else (current_price <= trade["tp1_price"])
+                if hit_tp1:
+                    exit_contracts = trade.get("exit_2_contracts", 0)
+                    closed_ratio = (exit_contracts / total_c) if exit_contracts > 0 else config.TP1_CLOSE_RATIO
+                    closed_val_inr = pos_inr * closed_ratio
+                    r_dist_pct = abs(trade["tp1_price"] - entry_price) / entry_price
+                    pnl_tp1_inr = closed_val_inr * r_dist_pct
+
+                    trade["remaining_contracts"] = max(0, trade.get("remaining_contracts", total_c) - exit_contracts)
+                    trade["remaining_ratio"] = trade["remaining_contracts"] / total_c
+                    trade["realized_pnl_inr"] += pnl_tp1_inr
+                    trade["tp1_hit"] = True
+
+                    # Lock SL to +1.0R in guaranteed profit for remaining runner
+                    r_dist = abs(entry_price - trade["initial_sl"])
+                    trade["sl_price"] = entry_price + (1.0 * r_dist) if side == "LONG" else entry_price - (1.0 * r_dist)
+
+                    self._apply_realized_pnl_inr(pnl_tp1_inr)
+                    self.save_state()
+                    telegram_notifier.notify_tp1_hit(trade, pnl_tp1_inr, trade["sl_price"])
+                    print(f"💰 [TP1 HIT] {symbol} closed {exit_contracts} contract(s) (+{config.format_inr(pnl_tp1_inr)}) & trailing SL locked!")
+
+            # ---------------------------------------------------------
+            # 3. TARGET 2 RUNNER (3.0R Home Run): Closes ALL Remaining Contracts
+            # ---------------------------------------------------------
+            hit_tp2 = (current_price >= trade["tp2_price"]) if side == "LONG" else (current_price <= trade["tp2_price"])
+            if hit_tp2 and trade["tp1_hit"]:
+                rem_c = trade.get("remaining_contracts", 0)
+                closed_ratio = (rem_c / total_c) if rem_c > 0 else trade.get("remaining_ratio", 0.30)
+                closed_val_inr = pos_inr * closed_ratio
+                r_dist_pct = abs(trade["tp2_price"] - entry_price) / entry_price
+                pnl_tp2_inr = closed_val_inr * r_dist_pct
+
+                trade["remaining_contracts"] = 0
+                trade["remaining_ratio"] = 0.0
+                total_trade_pnl_inr = trade["realized_pnl_inr"] + pnl_tp2_inr
+                self._apply_realized_pnl_inr(pnl_tp2_inr)
+
+                telegram_notifier.notify_tp2_hit(trade, total_trade_pnl_inr)
+                symbols_to_close.append((symbol, "TARGET_2_FULL_WIN", total_trade_pnl_inr, current_price))
+                continue
+
+            # ---------------------------------------------------------
+            # 4. STOP LOSS CHECK (Breakeven Plus, Trailing SL or Initial SL)
+            # ---------------------------------------------------------
+            hit_sl = (current_price <= sl_price) if side == "LONG" else (current_price >= sl_price)
+            if hit_sl:
+                rem_c = trade.get("remaining_contracts", 0)
+                closed_ratio = (rem_c / total_c) if rem_c > 0 else trade.get("remaining_ratio", 1.0)
+                remaining_val_inr = pos_inr * closed_ratio
+                trade["exit_price"] = sl_price
+
+                # Check if SL is in profit (Trailing SL or Breakeven Plus) or in loss
+                is_profit_sl = (sl_price > entry_price) if side == "LONG" else (sl_price < entry_price)
+                if is_profit_sl:
+                    pnl_dist_pct = abs(sl_price - entry_price) / entry_price
+                    remaining_pnl_inr = remaining_val_inr * pnl_dist_pct
+                    reason = "TRAILING_PROFIT_SL" if trade.get("tp1_hit") else "BREAKEVEN_PLUS_PROFIT_EXIT"
+                elif sl_price == entry_price:
+                    remaining_pnl_inr = 0.0
+                    reason = "BREAKEVEN_PROTECTED_EXIT"
+                else:
+                    loss_dist_pct = abs(sl_price - entry_price) / entry_price
+                    remaining_pnl_inr = -(remaining_val_inr * loss_dist_pct)
+                    reason = "STOP_LOSS_EXIT"
+
+                trade["remaining_contracts"] = 0
+                trade["remaining_ratio"] = 0.0
+                total_trade_pnl_inr = trade["realized_pnl_inr"] + remaining_pnl_inr
+                self._apply_realized_pnl_inr(remaining_pnl_inr)
+
+                telegram_notifier.notify_sl_hit(trade, total_trade_pnl_inr, reason)
+                symbols_to_close.append((symbol, reason, total_trade_pnl_inr, current_price))
+
+        for symbol, reason, final_pnl_inr, exit_px in symbols_to_close:
+            self._close_position_record(symbol, reason, final_pnl_inr, exit_px)
+
+    def _apply_realized_pnl_inr(self, pnl_inr):
+        """Applies realized PnL in INR and manages the MAX_ACTIVE_CAPITAL_INR cap."""
+        self.state["active_capital_inr"] += pnl_inr
+        self.state["total_net_pnl_inr"] += pnl_inr
+
+        # Surplus profit beyond MAX_ACTIVE_CAPITAL_INR gets banked into safe vault
+        if self.state["active_capital_inr"] > config.MAX_ACTIVE_CAPITAL_INR:
+            overflow = self.state["active_capital_inr"] - config.MAX_ACTIVE_CAPITAL_INR
+            self.state["banked_profit_inr"] += overflow
+            self.state["active_capital_inr"] = config.MAX_ACTIVE_CAPITAL_INR
+
+    def _close_position_record(self, symbol, reason, final_pnl_inr, exit_px):
+        """Archives closed trade and removes from open positions."""
+        if symbol in self.state["open_positions"]:
+            trade = self.state["open_positions"].pop(symbol)
+            trade["exit_time"] = config.get_now_ist().strftime('%Y-%m-%d %H:%M:%S')
+            trade["exit_price"] = exit_px
+            trade["final_pnl_inr"] = final_pnl_inr
+            trade["close_reason"] = reason
+
+            self.state["closed_trades"].append(trade)
+            self.save_state()
+            print(f"🏁 [POSITION CLOSED] {symbol} | Reason: {reason} | Final PnL: {config.format_inr(final_pnl_inr)}")

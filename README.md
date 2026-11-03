@@ -1,0 +1,1 @@
+# ICT Asian Judas OTE Master Bot\n\nProduction Trading Bot for Delta Exchange India (INR).\n

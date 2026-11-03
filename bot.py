@@ -1,82 +1,257 @@
+"""
+========================================================================================
+ICT ASIAN JUDAS SWING & OTE MASTER BOT - MAIN RUNNER (INR EDITION)
+Delta Exchange India (api.india.delta.exchange)
+Currency: Indian Rupee (INR - ₹)
+Time strictly locked to Indian Standard Time (IST, UTC+5:30)
+========================================================================================
+"""
 import time
-import datetime
-import sys
 import os
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import json
 import config
 from delta_client import DeltaClient
-from whale_feed import WhaleFeed
 from strategy import StrategyEngine
-from telegram_notifier import send_telegram_alert, start_telegram_polling_thread, is_bot_paused
+import telegram_notifier
 
-# Hamesha India ka time (+5:30) explicitly lock:
-IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+client = DeltaClient()
+strategy = StrategyEngine(client)
 
-def get_now_ist():
-    return datetime.datetime.now(IST)
+ACTIVE_SYMBOLS = list(getattr(config, 'SYMBOLS', []))
+LAST_UNIVERSE_REFRESH = 0
 
-def get_now_ist_str():
-    return datetime.datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')
+def refresh_screener_universe():
+    """
+    DYNAMIC INSTITUTIONAL SCREENER SYNC:
+    Scans all 240+ Delta Exchange India contracts in 1 bulk API request and updates
+    the active trading watchlist with top liquid, tight-spread coins.
+    """
+    global ACTIVE_SYMBOLS, LAST_UNIVERSE_REFRESH
+    if getattr(config, 'DYNAMIC_UNIVERSE_ENABLED', False):
+        try:
+            top_coins = client.fetch_dynamic_top_universe(
+                limit=getattr(config, 'DYNAMIC_UNIVERSE_LIMIT', 25),
+                min_volume_usd=getattr(config, 'DYNAMIC_MIN_VOLUME_USD', 500000.0),
+                max_spread_pct=getattr(config, 'DYNAMIC_MAX_SPREAD_PCT', 0.0020)
+            )
+            if top_coins and len(top_coins) >= 3:
+                ACTIVE_SYMBOLS = top_coins
+                LAST_UNIVERSE_REFRESH = time.time()
+                print(f"🔥 [SCREENER SYNC] Active universe updated: {len(ACTIVE_SYMBOLS)} high-liquidity coins.")
+        except Exception as e:
+            print(f"[SCREENER SYNC ERROR] {e}")
 
-GLOBAL_CLIENT = None
-
-# ==============================================================================
-# KEEP-ALIVE SERVER (For 24/7 Cloud Hosting on Render/Koyeb/Railway)
-# ==============================================================================
-class KeepAliveHandler(BaseHTTPRequestHandler):
+class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
+        """Responds to UptimeRobot HEAD ping with 200 OK to keep service alive."""
         self.send_response(200)
-        self.send_header('Content-type', 'application/json')
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
 
     def do_GET(self):
+        if self.path == "/reset":
+            client.state["active_capital_inr"] = 2000.0
+            client.state["initial_capital_inr"] = 2000.0
+            client.state["month_starting_capital_inr"] = 2000.0
+            client.state["banked_profit_inr"] = 0.0
+            client.state["total_net_pnl_inr"] = 0.0
+            client.state["open_positions"] = {}
+            client.state["closed_trades"] = []
+            client.save_state()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"<html><body style='background:#0d1117;color:#c9d1d9;font-family:sans-serif;padding:40px;text-align:center;'><h2>&#9989; Virtual Capital Reset to Rs 2,000 INR Successfully!</h2><p><a href='/' style='color:#58a6ff;'>Back to Dashboard</a></p></body></html>")
+            return
+
+        state = client.state
+        trades = state.get("closed_trades", [])
+        wins = sum(1 for t in trades if t.get("final_pnl_inr", 0) > 0)
+        losses = sum(1 for t in trades if t.get("final_pnl_inr", 0) < 0)
+        total = len(trades)
+        win_rate = (wins / total * 100) if total > 0 else 0.0
+
+        now_ist_str = config.get_now_ist().strftime('%Y-%m-%d %I:%M:%S %p')
+        active_cap = state.get("active_capital_inr", config.INITIAL_CAPITAL_INR)
+        banked = state.get("banked_profit_inr", 0.0)
+        net_pnl = state.get("total_net_pnl_inr", 0.0)
+
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>ICT Asian Judas OTE Master Bot (INR)</title>
+            <meta http-equiv="refresh" content="30">
+            <style>
+                body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 20px; }}
+                .container {{ max-width: 950px; margin: 0 auto; }}
+                .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363d; padding-bottom: 15px; margin-bottom: 20px; }}
+                h2 {{ color: #58a6ff; margin: 0; }}
+                .badge {{ padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; margin-left: 5px; }}
+                .badge-green {{ background: #238636; color: white; }}
+                .badge-blue {{ background: #1f6feb; color: white; }}
+                .badge-orange {{ background: #d29922; color: #0d1117; }}
+                .badge-purple {{ background: #8957e5; color: white; }}
+                .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin-bottom: 25px; }}
+                .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 15px; }}
+                .card-title {{ font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 5px; }}
+                .card-val {{ font-size: 20px; font-weight: bold; color: #f0f6fc; }}
+                .pos-table {{ width: 100%; border-collapse: collapse; background: #161b22; border-radius: 6px; overflow: hidden; }}
+                .pos-table th, .pos-table td {{ padding: 10px 14px; text-align: left; border-bottom: 1px solid #30363d; font-size: 13px; }}
+                .pos-table th {{ background: #21262d; color: #8b949e; }}
+                .text-green {{ color: #3fb950; font-weight: bold; }}
+                .text-red {{ color: #f85149; font-weight: bold; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h2>🎯 ICT Asian Judas OTE Master Bot (Delta India)</h2>
+                    <div>
+                        <span class="badge badge-purple">🇮🇳 IST: {now_ist_str}</span>
+                        <span class="badge badge-green">INR (₹) EDITION</span>
+                        <span class="badge badge-orange">{config.LEVERAGE}x LEVERAGE</span>
+                        <span class="badge badge-purple">24x7 NONSTOP TRADING</span>
+                        <span class="badge badge-blue">{'PAPER TRADING' if config.PAPER_TRADING else 'LIVE TRADING'}</span>
+                        <a href="/reset" style="background:#238636;color:white;padding:4px 8px;text-decoration:none;border-radius:4px;font-size:12px;font-weight:bold;margin-left:5px;" onclick="return confirm('Reset virtual balance to Rs 2,000 INR?');">&#128260; RESET TO &#8377;2,000</a>
+                    </div>
+                </div>
+
+                <div class="grid">
+                    <div class="card">
+                        <div class="card-title">Active INR Capital</div>
+                        <div class="card-val">{config.format_inr(active_cap)}</div>
+                    </div>
+                    <div class="card">
+                        <div class="card-title">Banked Vault (Cap ₹90L)</div>
+                        <div class="card-val text-green">{config.format_inr(banked)}</div>
+                    </div>
+                    <div class="card">
+                        <div class="card-title">Total Realized PnL</div>
+                        <div class="card-val {'text-green' if net_pnl >= 0 else 'text-red'}">{'+' if net_pnl >= 0 else ''}{config.format_inr(net_pnl)}</div>
+                    </div>
+                    <div class="card">
+                        <div class="card-title">Win Rate</div>
+                        <div class="card-val">{win_rate:.1f}% ({wins}W / {losses}L)</div>
+                    </div>
+                </div>
+
+                <h3>Active Positions ({len(state.get('open_positions', {}))})</h3>
+                <table class="pos-table">
+                    <thead>
+                        <tr>
+                            <th>Coin</th>
+                            <th>Side</th>
+                            <th>Entry (USD / INR)</th>
+                            <th>SL</th>
+                            <th>Rescue (+1R)</th>
+                            <th>Target 1</th>
+                            <th>Margin (20x INR)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        """
+        open_pos = state.get("open_positions", {})
+        if not open_pos:
+            html += f"<tr><td colspan='7' style='text-align: center; color: #8b949e; padding: 20px;'>No active positions. Scanning Top {len(ACTIVE_SYMBOLS)} high-liquidity coins...</td></tr>"
+        else:
+            for sym, p in open_pos.items():
+                side_cls = "text-green" if p['side'] == "LONG" else "text-red"
+                html += f"""
+                <tr>
+                    <td><b>{sym}</b></td>
+                    <td class="{side_cls}">{p['side']}</td>
+                    <td>${p['entry_price']:.4f} <small style='color:#8b949e'>(~₹{p.get('entry_inr_est', 0):,.2f})</small></td>
+                    <td>${p['sl_price']:.4f}</td>
+                    <td>${p['rescue_tp']:.4f}</td>
+                    <td>${p['tp1_price']:.4f}</td>
+                    <td>{config.format_inr(p.get('margin_used_inr', 0))}</td>
+                </tr>
+                """
+
+        coin_badges = "".join([f"<span class='badge badge-blue' style='margin:3px;display:inline-block;'>{s}</span>" for s in ACTIVE_SYMBOLS])
+        html += f"""
+                    </tbody>
+                </table>
+
+                <h3 style="margin-top:25px;">📜 Recent Closed Trades ({len(trades)})</h3>
+                <table class="pos-table">
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Time (IST)</th>
+                            <th>Coin</th>
+                            <th>Side</th>
+                            <th>Entry</th>
+                            <th>Exit</th>
+                            <th>Reason</th>
+                            <th>Net PnL (INR)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        """
+        if not trades:
+            html += "<tr><td colspan='8' style='text-align: center; color: #8b949e; padding: 15px;'>No closed trades recorded yet.</td></tr>"
+        else:
+            for idx, ct in enumerate(reversed(trades[-50:]), 1):
+                pnl_val = ct.get("final_pnl_inr", 0.0)
+                pnl_cls = "text-green" if pnl_val >= 0 else "text-red"
+                side_cls = "text-green" if ct.get("side") == "LONG" else "text-red"
+                html += f"""
+                <tr>
+                    <td>{idx}</td>
+                    <td><small style='color:#8b949e;'>{ct.get('exit_time', ct.get('entry_time', '-'))}</small></td>
+                    <td><b>{ct.get('symbol')}</b></td>
+                    <td class="{side_cls}">{ct.get('side')}</td>
+                    <td>${ct.get('entry_price', 0):.4f}</td>
+                    <td>${ct.get('exit_price', 0):.4f}</td>
+                    <td><small>{ct.get('exit_reason', ct.get('reason', '-'))}</small></td>
+                    <td class="{pnl_cls}">+{config.format_inr(pnl_val)}</td>
+                </tr>
+                """
+
+        coin_badges = "".join([f"<span class='badge badge-blue' style='margin:3px;display:inline-block;'>{s}</span>" for s in ACTIVE_SYMBOLS])
+        html += f"""
+                    </tbody>
+                </table>
+
+                <h3 style="margin-top:25px;">⚡ Dynamic Watchlist ({len(ACTIVE_SYMBOLS)} Screened Coins)</h3>
+                <div class="card" style="line-height:2.0;">
+                    <div class="card-title">Auto-Screened from 240+ Delta India Perpetual Futures (Min 24h Vol: $500k | Spread &lt; 0.20%)</div>
+                    {coin_badges}
+                </div>
+            </div>
+        </body>
+        </html>
+        """
         self.send_response(200)
-        self.send_header('Content-type', 'application/json')
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
-        open_pos = GLOBAL_CLIENT.portfolio.get("open_positions", {}) if GLOBAL_CLIENT else {}
-        history = GLOBAL_CLIENT.portfolio.get("trade_history", []) if GLOBAL_CLIENT else []
-        sym_curr = getattr(config, 'CURRENCY_SYMBOL', '₹')
-        bal = GLOBAL_CLIENT.get_balance() if GLOBAL_CLIENT and hasattr(GLOBAL_CLIENT, 'get_balance') else config.VIRTUAL_INITIAL_BALANCE
-        realized = GLOBAL_CLIENT.portfolio.get("realized_pnl", 0.0) if GLOBAL_CLIENT else 0.0
-        response = {
-            "status": "online",
-            "bot": "Delta Whale & Momentum Quant Engine (India INR)",
-            "currency": getattr(config, 'CURRENCY', 'INR'),
-            "currency_symbol": sym_curr,
-            "mode": "Live Paper Trading (INR)" if config.PAPER_TRADING else "Live Real",
-            "virtual_balance": bal,
-            "virtual_balance_formatted": f"{sym_curr}{bal:,.2f}",
-            "realized_pnl": realized,
-            "realized_pnl_formatted": f"{'+' if realized >= 0 else ''}{sym_curr}{realized:,.2f}",
-            "open_positions": open_pos,
-            "open_positions_count": len(open_pos),
-            "trade_history": history,
-            "trade_history_count": len(history),
-            "time_ist": get_now_ist_str()
-        }
-        self.wfile.write(json.dumps(response, indent=2).encode('utf-8'))
+        self.wfile.write(html.encode('utf-8'))
 
     def log_message(self, format, *args):
-        return # Silence HTTP access logs
+        return  # Suppress HTTP access noise
 
-def start_keepalive_server():
-    port = int(os.environ.get("PORT", 8080))
-    try:
-        server = HTTPServer(('0.0.0.0', port), KeepAliveHandler)
-        print(f"🌐 [CLOUD SERVER] Keep-alive web endpoint active on port {port}")
-        server.serve_forever()
-    except Exception as e:
-        print(f"[CLOUD SERVER] Server note: {e}")
+def run_http_server():
+    server = HTTPServer((config.SERVER_HOST, config.SERVER_PORT), KeepAliveDashboardHandler)
+    print(f"🌐 Keepalive Web Server listening on port {config.SERVER_PORT}")
+    server.serve_forever()
+
+def run_telegram_poller():
+    while True:
+        try:
+            telegram_notifier.handle_telegram_updates(client)
+        except Exception as e:
+            pass
+        time.sleep(2)
 
 LAST_LOOP_TIMESTAMP = time.time()
 LAST_HEARTBEAT_SENT = 0
 
 def watchdog_and_heartbeat_loop(client):
-    """Background watchdog ensuring trading loop never freezes and periodic heartbeat alerts."""
-    global LAST_LOOP_TIMESTAMP, LAST_HEARTBEAT_SENT
-    sym_curr = getattr(config, 'CURRENCY_SYMBOL', '₹')
+    """Background watchdog ensuring trading loop never freezes, periodic screener refreshes, and heartbeat alerts."""
+    global LAST_LOOP_TIMESTAMP, LAST_HEARTBEAT_SENT, LAST_UNIVERSE_REFRESH
     while True:
         try:
             time.sleep(30)
@@ -84,227 +259,113 @@ def watchdog_and_heartbeat_loop(client):
 
             # 1. Check if trading loop stalled > 90 seconds
             if now - LAST_LOOP_TIMESTAMP > 90:
-                print(f"⚠️ [WATCHDOG ALERT] Whale Bot loop stalled for {int(now - LAST_LOOP_TIMESTAMP)}s!")
+                print(f"⚠️ [WATCHDOG ALERT] Trading loop stalled for {int(now - LAST_LOOP_TIMESTAMP)}s!")
 
-            # 2. Automatic Heartbeat Pulse Every 4 Hours (14,400 seconds)
+            # 2. Hourly dynamic universe screener refresh
+            if (now - LAST_UNIVERSE_REFRESH) >= getattr(config, 'DYNAMIC_REFRESH_INTERVAL_SECONDS', 3600):
+                refresh_screener_universe()
+
+            # 3. Automatic Heartbeat Pulse Every 4 Hours (14,400 seconds)
             if (now - LAST_HEARTBEAT_SENT) >= 14400:
                 LAST_HEARTBEAT_SENT = now
-                bal = client.portfolio.get('virtual_balance', config.VIRTUAL_INITIAL_BALANCE)
-                realized = client.portfolio.get('realized_pnl', 0.0)
-                open_cnt = len(client.portfolio.get("open_positions", {}))
+                open_cnt = len(client.state.get("open_positions", {}))
+                active_cap = client.state.get("active_capital_inr", 2000.0)
+                now_ist_str = config.get_now_ist().strftime("%Y-%m-%d %H:%M IST")
+                top_prev = ', '.join(ACTIVE_SYMBOLS[:6]) + ('...' if len(ACTIVE_SYMBOLS) > 6 else '')
                 
                 hb_msg = (
-                    f"💓 *[BOT 4: WHALE SNIPER HEARTBEAT]*\n"
-                    f"• Time (IST): `{get_now_ist_str()}`\n"
+                    f"💓 *[BOT 2: FIBONACCI SNIPER HEARTBEAT]*\n"
+                    f"• Time (IST): `{now_ist_str}`\n"
                     f"• System Status: 🟢 *ONLINE & SCANNING 24x7*\n"
-                    f"• Universe: 230+ Delta Perpetual Futures\n"
+                    f"• Dynamic Universe: *{len(ACTIVE_SYMBOLS)} Liquid Coins (Screened 240+)*\n"
+                    f"• Top Watchlist: `{top_prev}`\n"
                     f"• Active Positions: *{open_cnt}*\n"
-                    f"• Virtual Capital: *{sym_curr}{bal:,.2f}*\n"
-                    f"• Realized PnL: *{'+' if realized >= 0 else ''}{sym_curr}{realized:,.2f}*\n"
+                    f"• Capital: *{config.format_inr(active_cap)}*\n"
                     f"• Health: Zero errors | UptimeRobot Active"
                 )
-                send_telegram_alert(hb_msg)
+                telegram_notifier.send_alert(hb_msg)
         except Exception as e:
             print(f"[WATCHDOG ERROR] {e}")
 
 def main():
-    sym_curr = getattr(config, 'CURRENCY_SYMBOL', '₹')
-    usd_rate = getattr(config, 'USD_TO_INR', 89.0)
+    now_ist_str = config.get_now_ist().strftime('%Y-%m-%d %I:%M:%S %p')
+    active_cap = client.state.get('active_capital_inr', config.INITIAL_CAPITAL_INR)
+    banked = client.state.get('banked_profit_inr', 0.0)
 
-    # 🛡️ WINDOWS 24/7 ANTI-SLEEP SHIELD: Laptop screen off hone par bhi sleep nahi hoga!
-    if sys.platform == "win32":
-        try:
-            import ctypes
-            ES_CONTINUOUS = 0x80000000
-            ES_SYSTEM_REQUIRED = 0x00000001
-            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
-            print("[POWER] 🛡️ Windows Anti-Sleep Active: Laptop display off hone par bhi bot 24/7 chalega!")
-        except Exception as e:
-            print(f"[POWER] Anti-sleep note: {e}")
+    # Initial Screen of 240+ Coins
+    refresh_screener_universe()
 
-    # Start Keep-Alive Web Server for 24x7 cloud uptime
-    threading.Thread(target=start_keepalive_server, daemon=True).start()
+    print("=" * 90)
+    print("🎯 ICT ASIAN JUDAS SWING & OTE MASTER BOT - DELTA EXCHANGE INDIA (INR EDITION)")
+    print(f"   Mode: {'🟢 PAPER TRADING (Safe Simulation)' if config.PAPER_TRADING else '🔥 REAL TRADING'}")
+    print(f"   Clock: {now_ist_str} IST (Locked UTC+5:30)")
+    print(f"   Currency: Indian Rupee (INR - ₹)")
+    print(f"   Active Capital: {config.format_inr(active_cap)} | Banked Vault: {config.format_inr(banked)}")
+    print(f"   Leverage: {config.LEVERAGE}x | Target Position: ₹9,000 - ₹10,000 (~₹475 margin)")
+    print(f"   Dynamic Watchlist ({len(ACTIVE_SYMBOLS)} coins): {', '.join(ACTIVE_SYMBOLS)}")
+    print(f"   Trading Engine: 24x7 Nonstop (London, NY, and Night Sessions Active | Asian Range 05:30-12:30)")
+    print("=" * 90)
 
-    print("=" * 65)
-    print("  WHALE & MOMENTUM ENGINE - DELTA EXCHANGE INDIA FUTURES")
-    print("  Mode: 100% LIVE PAPER TRADING (Safe Forward-Testing in INR)")
-    print(f"  Initial Virtual Capital: {sym_curr}{config.VIRTUAL_INITIAL_BALANCE:,.2f} ({config.CURRENCY})")
-    print(f"  Delta USD/INR Peg Rate: {sym_curr}{usd_rate:.2f} per USD")
-    print("  Universe: 100% DYNAMIC (Scanning ALL 230+ Delta Perpetual Futures)")
-    print("=" * 65)
+    # 1. Start Web Dashboard Keep-Alive thread
+    http_thread = threading.Thread(target=run_http_server, daemon=True)
+    http_thread.start()
 
-    client = DeltaClient()
-    global GLOBAL_CLIENT
-    GLOBAL_CLIENT = client
-    whale_feed = WhaleFeed()
-    engine = StrategyEngine(client, whale_feed)
+    # 2. Start Telegram remote poller thread
+    tg_thread = threading.Thread(target=run_telegram_poller, daemon=True)
+    tg_thread.start()
 
-    # Load approved AI parameter overrides
-    try:
-        import ai_advisor
-        ai_advisor.load_ai_overrides(config)
-    except Exception as e:
-        print(f"[AI NOTE] {e}")
+    # 3. Start Anti-Freeze Watchdog & Heartbeat thread
+    watchdog_thread = threading.Thread(target=watchdog_and_heartbeat_loop, args=(client,), daemon=True)
+    watchdog_thread.start()
+    print("🛡️ [WATCHDOG] Anti-Freeze Watchdog, 1-Hour Screener & 4-Hour Heartbeat active.")
 
-    # Start Instant Telegram Command Listener (Runs in background, responds in <1.5s)
-    start_telegram_polling_thread(client)
-
-    # Start Anti-Freeze Watchdog & Heartbeat thread
-    threading.Thread(target=watchdog_and_heartbeat_loop, args=(client,), daemon=True).start()
-    print("🛡️ [WATCHDOG] Anti-Freeze Watchdog & 4-Hour Heartbeat active.")
-
-    bal = client.portfolio.get('virtual_balance', config.VIRTUAL_INITIAL_BALANCE)
-    feed_tag = "ACTIVE (L2 Depth + Taker Flow + OI + Top Whales)" if getattr(config, 'ENABLE_INSTITUTIONAL_FEEDS', False) else "Standard"
-    startup_msg = (
-        f"🤖 *WHALE & MOMENTUM SNIPER BOT STARTED (DELTA INDIA)*\n\n"
-        f"• Mode: Live Paper Trading\n"
-        f"• Currency: *Indian Rupees ({sym_curr} INR)*\n"
-        f"• Virtual Capital: *{sym_curr}{bal:,.2f}*\n"
-        f"• Leverage: *{config.LEVERAGE}x*\n"
-        f"• Institutional Intelligence: *{feed_tag}*\n"
-        f"• Dynamic Wall Targets: *{'ON (Front-run 0.15%)' if getattr(config, 'ENABLE_DYNAMIC_TARGET_WALLS', False) else 'OFF'}*\n"
-        f"• Adaptive Harvesting: *{'ON (20% runner / 50% bank)' if getattr(config, 'ENABLE_ADAPTIVE_HARVEST_RATIO', False) else 'OFF'}*\n"
-        f"• Fixed Budget: *{sym_curr}{getattr(config, 'FIXED_POSITION_SIZE_INR', 5000.0):,.0f} per trade*\n"
-        f"• Universe: *Approved Major Whitelisted Assets*\n"
-        f"• Timeframe: *{getattr(config, 'ENTRY_TIMEFRAME', '5m')} Sniper Entries*\n"
-        f"• Time Lock (IST): *{get_now_ist_str()}*\n"
-        f"• Status: 24/7 Institutional Confluence Radar ACTIVE 🌐"
+    top_preview = ', '.join(ACTIVE_SYMBOLS[:8]) + ('...' if len(ACTIVE_SYMBOLS) > 8 else '')
+    # Startup Notification to Telegram
+    telegram_notifier.send_alert(
+        f"🚀 *[ICT SNIPER BOT STARTED - INR EDITION]*\n"
+        f"═══════════════════════\n"
+        f"🇮🇳 *Clock:* `{now_ist_str}` IST\n"
+        f"🇮🇳 *Currency:* `Indian Rupee (INR - ₹)`\n"
+        f"💼 *Starting Capital:* `{config.format_inr(active_cap)}`\n"
+        f"⚡ *Leverage:* {config.LEVERAGE}x Isolated\n"
+        f"🎯 *Position Size:* `₹9,000 - ₹10,000 (~₹475 Margin)`\n"
+        f"🕒 *Trading Mode:* `24x7 Nonstop (Night & Weekend Enabled)`\n"
+        f"🪙 *Dynamic Universe:* Top {len(ACTIVE_SYMBOLS)} Liquid Coins (Filtered from 240+)\n"
+        f"📋 *Top Watchlist:* `{top_preview}`\n"
+        f"🛡️ *Rescued Risk Management:* ACTIVE (+1.0R / BE Lock)\n"
+        f"✅ Bot is actively scanning and ready for trades!"
     )
-    send_telegram_alert(startup_msg)
 
-    scan_count = 0
+    # 4. Main 24/7 Scanning Loop
+    scan_interval = 20  # scan every 20 seconds
     while True:
         try:
             global LAST_LOOP_TIMESTAMP
             LAST_LOOP_TIMESTAMP = time.time()
-            scan_count += 1
-            print(f"\n--- [SCAN #{scan_count}] Checking Whale Radar ({get_now_ist_str()}) ---")
+            # A. Manage and monitor open positions
+            client.manage_positions()
 
-            # Check if bot is paused via Telegram
-            if is_bot_paused():
-                print(f"  [PAUSED] Whale Bot is paused via Telegram command. Waiting...")
-                time.sleep(config.SCAN_INTERVAL_SECONDS)
-                continue
-
-            # 1. Fetch live Delta tickers
-            tickers = client.get_all_tickers()
-            if not tickers:
-                print("[WARN] Could not retrieve tickers from Delta India, retrying in 10s...")
-                time.sleep(10)
-                continue
-
-            # 2. Manage existing open positions (Check SL & TPs)
-            engine.manage_positions(tickers)
-
-            # 3. Universe Scanner: Scan High-Quality Approved Major Assets (No Meme Traps!)
-            perp_candidates = []
-            approved_set = set(getattr(config, 'APPROVED_MAJOR_COINS', []))
-            banned_set = set(getattr(config, 'BANNED_SYMBOLS', []))
-            strict_mode = getattr(config, 'STRICT_MAJOR_COINS_ONLY', True)
-
-            for sym, t in tickers.items():
-                if sym in banned_set:
-                    continue
-                if strict_mode and sym not in approved_set:
-                    continue
-                p_info = client.cached_products.get(sym, {})
-                if p_info.get('contract_type') == 'perpetual_futures':
-                    turnover = float(t.get('turnover_usd', 0) or 0)
-                    if turnover >= getattr(config, 'MIN_24H_VOLUME_USD', 50000.0):
-                        perp_candidates.append(t)
-
-            # Sort by highest turnover & whale activity
-            perp_candidates.sort(key=lambda x: float(x.get('turnover_usd', 0) or 0), reverse=True)
-            active_scan_symbols = [t['symbol'] for t in perp_candidates[:config.MAX_HOT_COINS_TO_DEEP_SCAN]]
-
-            # Also ensure any currently open positions are always included
-            for open_sym in client.portfolio["open_positions"]:
-                if open_sym not in active_scan_symbols:
-                    active_scan_symbols.append(open_sym)
-
-            print(f"  [RADAR] Dynamically scanning top {len(active_scan_symbols)} active whale/momentum coins...")
-
-            for symbol in active_scan_symbols:
-                ticker = tickers.get(symbol)
-                if not ticker:
-                    continue
-
-                # Check if position already open
-                if symbol in client.portfolio["open_positions"]:
-                    pos = client.portfolio["open_positions"][symbol]
-                    cur_p = float(ticker.get("mark_price", 0) or 0)
-                    side_pos = pos.get("side", "LONG")
-                    gain = (cur_p - pos["entry_price"]) / pos["entry_price"] if side_pos == "LONG" else (pos["entry_price"] - cur_p) / pos["entry_price"]
-                    size_inr = pos.get('size_inr', pos.get('size_usd', 0) * usd_rate)
-                    cts = pos.get('contracts', 0)
-                    cnt_str = f" | {cts} Cts" if cts > 0 else ""
-                    print(f"  [*] {symbol:13} [{side_pos:5}] | Entry: ${pos['entry_price']} | Cur: ${cur_p} | Gain: {gain*100:+.2f}%{cnt_str} | Size: {sym_curr}{size_inr:,.0f}")
-                    continue
-
-                # Multi-Timeframe Engine: 3m Sniper Entry + 15m Macro Structure & Fib Targets
-                entry_tf = getattr(config, 'ENTRY_TIMEFRAME', '3m')
-                macro_tf = getattr(config, 'MACRO_TIMEFRAME', '15m')
-                candles_entry = client.get_candles(symbol, resolution=entry_tf, limit=65)
-                candles_macro = client.get_candles(symbol, resolution=macro_tf, limit=45)
-                
-                res_eval = engine.evaluate_entry(symbol, ticker, candles_entry, macro_candles=candles_macro)
-                if len(res_eval) == 7:
-                    should_enter, side, entry_price, sl_price, score, reason, targets = res_eval
-                else:
-                    should_enter, side, entry_price, sl_price, score, reason = res_eval
-                    targets = {}
-
-                if should_enter:
-                    # SNAP ACTION! Open position with Trend-Based Fib Targets
-                    pos = client.open_paper_position(symbol, entry_price, sl_price, score, reason, side=side, targets=targets)
-                    if not pos:
+            # B. Scan symbols for new setups if space available
+            open_count = len(client.state.get("open_positions", {}))
+            if open_count < config.MAX_CONCURRENT_TRADES:
+                for symbol in ACTIVE_SYMBOLS:
+                    if symbol in client.state.get("open_positions", {}):
                         continue
-                    side_badge = "🟢 LONG (BUY UP)" if side == "LONG" else "🔴 SHORT (SELL DOWN)"
-                    t1 = entry_price * (1 + config.TP1_PCT) if side == "LONG" else entry_price * (1 - config.TP1_PCT)
-                    t2 = entry_price * (1 + config.TP2_PCT) if side == "LONG" else entry_price * (1 - config.TP2_PCT)
-                    t3 = entry_price * (1 + config.TP3_PCT) if side == "LONG" else entry_price * (1 - config.TP3_PCT)
 
-                    pos_size_inr = pos.get('size_inr', pos.get('size_usd', 0) * usd_rate)
-                    pos_size_usd = pos.get('size_usd', pos_size_inr / usd_rate)
-                    sl_dist_pct = abs(entry_price - sl_price) / entry_price * 100 if entry_price > 0 else (config.STOP_LOSS_PCT * 100)
-                    max_sl_loss_inr = pos_size_inr * (sl_dist_pct / 100.0)
+                    candles = client.fetch_candles(symbol, resolution=config.CANDLE_RESOLUTION, limit=60)
+                    if len(candles) < 25:
+                        continue
 
-                    entry_alert = (
-                        f"🚨 *WHALE ENTRY DETECTED: {symbol}* 🚨\n\n"
-                        f"• Direction: *{side_badge}*\n"
-                        f"• Confluence Score: *{score}/100*\n"
-                        f"• Time (IST): *{get_now_ist_str()}*\n"
-                        f"• Reasons: _{reason}_\n"
-                        f"• Entry Price: `${entry_price}`\n"
-                        f"• Initial Stop-Loss: `${sl_price}` (-{sl_dist_pct:.2f}%)\n"
-                        f"• Micro-Shield: At +{config.MICRO_BE_TRIGGER_PCT*100:.1f}% gain, SL pulls to Breakeven (+0.20% Buffer)\n"
-                        f"• Target 1 (+{config.TP1_PCT*100:.1f}%): `${t1:.5f}` (Adaptive Wall-Harvest & Lock SL to +1.5%)\n"
-                        f"• Target 2 (+{config.TP2_PCT*100:.1f}%): `${t2:.5f}` (Book 40% Cash & Lock SL to +3.0%)\n"
-                        f"• Target 3 (+{config.TP3_PCT*100:.1f}%): `${t3:.5f}` (Moonshot Runner 🚀)\n"
-                        f"• Fixed Position Budget: *{sym_curr}{pos_size_inr:,.2f}* (${pos_size_usd:,.2f} USD | {config.LEVERAGE}x)\n"
-                        f"• Max SL Loss Risk: *{sym_curr}{max_sl_loss_inr:,.2f}* (-{sl_dist_pct:.2f}% on position)"
-                    )
-                    send_telegram_alert(entry_alert)
-                else:
-                    mark = ticker.get("mark_price", 0)
-                    if score > 0:
-                        print(f"  [+] {symbol:13} | Price: {mark} | Score: {score:2}/100 | {reason[:45]}")
+                    setup = strategy.analyze_symbol(symbol, candles)
+                    if setup:
+                        client.open_position(setup)
+                        if len(client.state.get("open_positions", {})) >= config.MAX_CONCURRENT_TRADES:
+                            break
 
-            # 4. Portfolio Summary
-            open_count = len(client.portfolio["open_positions"])
-            balance = client.portfolio["virtual_balance"]
-            realized = client.portfolio["realized_pnl"]
-            print(f"--> Portfolio: Balance: {sym_curr}{balance:,.2f} | Realized PnL: {'+' if realized >= 0 else ''}{sym_curr}{realized:,.2f} | Open Positions: {open_count}")
-
-            time.sleep(config.SCAN_INTERVAL_SECONDS)
-
-        except KeyboardInterrupt:
-            print("\n[STOP] Bot stopped by user. Saving state...")
-            client.save_portfolio()
-            break
         except Exception as e:
-            print(f"[ERROR] Main loop exception: {e}")
-            time.sleep(10)
+            print(f"❌ [LOOP ERROR]: {e}")
 
-if __name__ == '__main__':
+        time.sleep(scan_interval)
+
+if __name__ == "__main__":
     main()
