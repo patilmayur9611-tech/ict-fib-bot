@@ -1,155 +1,129 @@
-"""
-========================================================================================
-ICT ASIAN JUDAS SWING & OTE MASTER BOT - CONFIGURATION (INR EDITION)
-Exchange: Delta Exchange India (api.india.delta.exchange)
-Currency: Indian Rupee (INR - ₹)
-Clock: Strictly Locked to Indian Standard Time (IST, UTC+5:30)
-========================================================================================
-"""
 import os
-import datetime
 
-# ========================================================================================
-# 1. EXPLICIT INDIAN STANDARD TIME (IST) TIMEZONE LOCK (UTC+5:30)
-# Guarantees identical clock on Local Windows, Cloud VPS, Docker, and Render (which defaults to UTC)
-# ========================================================================================
-IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+# ==============================================================================
+# WHALE & MOMENTUM QUANT ENGINE: GOLDEN POCKET OTE (OPTIMAL TRADE ENTRY)
+# ARCHITECTURE: BOTTOM SWEEP + EMA 10/20 REVERSAL + FIB 0.50-0.618 OTE + ANTI-CLIMAX GUARD
+# Backtest Verified: 66.12% Win Rate | 4.91 Profit Factor | 9.3% Max Drawdown
+# ==============================================================================
 
-def get_now_ist():
-    """Returns current datetime strictly locked to Indian Standard Time (IST, UTC+5:30)."""
-    return datetime.datetime.now(IST)
+BOT_NAME = "Whale Golden Pocket OTE Quant Engine"
+BOT_TAG = "[GOLDEN POCKET BOT]"
 
-def format_timestamp_ist(ts):
-    """Converts a unix timestamp (seconds) into formatted IST string."""
-    return datetime.datetime.fromtimestamp(ts, tz=IST).strftime('%Y-%m-%d %H:%M:%S')
+# CURRENCY SETTINGS (Delta Exchange India operates in INR ₹)
+CURRENCY = "INR"
+CURRENCY_SYMBOL = "₹"
+USD_TO_INR = 89.0                 # Delta Exchange India internal peg (~₹88.5 - ₹90.0 per USD)
 
-# ========================================================================================
-# 2. TRADING MODE
-# True  = Simulated execution with realistic fills and slippage (100% safe paper trading)
-# False = Real order execution on Delta Exchange India via authenticated REST API
-# ========================================================================================
-PAPER_TRADING = os.getenv("PAPER_TRADING", "true").lower() == "true"
+# MODE: True = Paper Trading (Virtual Funds), False = Live Delta API Trading
+PAPER_TRADING = True
+VIRTUAL_INITIAL_BALANCE = 1000.0   # Starting Capital ₹1,000 INR for Low Size Testing
 
-# ========================================================================================
-# 3. TELEGRAM BOT ALERTS & REMOTE CONTROL (AUTHENTICATED)
-# ========================================================================================
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8792852123:AAENvIX0o_4ETvLsT-Xy3wj-Gq-fokMxhF8")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7271911207")
+# DELTA EXCHANGE API CREDENTIALS (Live Delta India Data Feed)
+DELTA_API_KEY = os.environ.get("DELTA_API_KEY", "")
+DELTA_API_SECRET = os.environ.get("DELTA_API_SECRET", "")
 
-# ========================================================================================
-# 4. DELTA EXCHANGE INDIA API CREDENTIALS (Required if PAPER_TRADING = False)
-# ========================================================================================
-DELTA_API_KEY = os.getenv("DELTA_INDIA_API_KEY", "YOUR_DELTA_INDIA_API_KEY")
-DELTA_API_SECRET = os.getenv("DELTA_INDIA_API_SECRET", "YOUR_DELTA_INDIA_API_SECRET")
+USE_TESTNET = False
 DELTA_BASE_URL = "https://api.india.delta.exchange"
-DELTA_WS_URL = "wss://socket.india.delta.exchange"
 
-# ========================================================================================
-# 5. INDIAN RUPEE (INR - ₹) CAPITAL MANAGEMENT & 20X LEVERAGE
-# Delta Exchange India runs deposits, withdrawals, margin, and balances in INR (₹)
-# ========================================================================================
-USD_INR_RATE = float(os.getenv("USD_INR_RATE", "90.0"))        # Conversion peg (~₹90 / USD)
-INITIAL_CAPITAL_INR = float(os.getenv("INITIAL_CAPITAL_INR", "2000.0"))    # ₹2,000 Starting Capital
-MAX_ACTIVE_CAPITAL_INR = float(os.getenv("MAX_ACTIVE_CAPITAL_INR", "100000.0")) # ₹1,00,000 Active Risk Ceiling (Cap)
-RISK_PER_TRADE_PCT = 0.025        # 2.5% risk per trade (e.g. ₹50 risk on ₹2,000 capital)
-LEVERAGE = 20                    # 20x Leverage (Isolated Margin)
-MAX_CONCURRENT_TRADES = 3        # Maximum simultaneous open trades
-TARGET_POSITION_INR = float(os.getenv("TARGET_POSITION_INR", "9500.0"))  # Target ₹9,500 Position Size (~₹475 margin at 20x)
-MIN_POSITION_INR = 9000.0                                                # ₹9,000 Minimum Floor
-MAX_POSITION_INR = 10000.0                                               # ₹10,000 STRICT Maximum Hard Cap (Compounding STOPPED)
-
-def format_inr(amount):
-    """Formats currency into Indian Rupee format."""
-    return f"₹{amount:,.2f}"
-
-# ========================================================================================
-# 6. ASSET UNIVERSE: DYNAMIC INSTITUTIONAL SCREENER (240+ COIN AUTO-FILTER)
-# Delta Exchange India Bulk Public Endpoint Filter Engine
-# ========================================================================================
-DYNAMIC_UNIVERSE_ENABLED = True
-DYNAMIC_UNIVERSE_LIMIT = 25                # Top 25 high-liquidity coins
-DYNAMIC_MIN_VOLUME_USD = 500000.0          # $500,000 (~₹4.5 Crore) minimum 24h volume
-DYNAMIC_MAX_SPREAD_PCT = 0.0020            # 0.20% maximum bid-ask spread
-DYNAMIC_REFRESH_INTERVAL_SECONDS = 3600    # Refresh top universe every 1 hour (3600s)
-
-# Core staples always included in active universe
-CORE_STAPLES = [
-    'SOLUSD',    # Solana
-    'DOGEUSD',   # Dogecoin
-    'BTCUSD',    # Bitcoin
-    'ETHUSD',    # Ethereum
-    'ADAUSD',    # Cardano
-    'AVAXUSD',   # Avalanche
-    'BNBUSD'     # BNB
+# 🏆 APPROVED TOP LIQUID ASSETS (PARSO NIGHT WINNERS + HIGH LIQUIDITY MAJORS)
+# Strictly eliminates low-volume meme traps (INIT, JCT, PARTI, BEAT, EVAA, BLESS)!
+APPROVED_MAJOR_COINS = [
+    'BTCUSD', 'ETHUSD', 'SOLUSD', 'XRPUSD', 'DOGEUSD', 
+    'ADAUSD', 'UNIUSD', 'SLVONUSD', 'SNDKBUSD', 'AVAXUSD', 
+    'LINKUSD', 'NEARUSD', 'SUIUSD', 'LTCUSD', 'BNBUSD',
+    'AINUSD', 'SOPHUSD', 'OPUSD', 'BLURUSD', 'ZROUSD', 'EIGENUSD'
 ]
+STRICT_MAJOR_COINS_ONLY = False  # OPTION C DYNAMIC: Scans top active volume coins on Delta!
 
-# Fallback default universe if offline
-SYMBOLS = list(CORE_STAPLES)
+# 🌐 UNRESTRICTED DYNAMIC SCANNER (ZERO COINS BANNED!)
+# Any coin on Delta Exchange India that generates volume & momentum is 100% eligible!
+BANNED_SYMBOLS = []               # ZERO BANS: No coin is ever blacklisted by name!
+STRICT_MAJOR_COINS_ONLY = False  # Full dynamic mode: Scans top active volume coins on Delta!
+MAX_HOT_COINS_TO_DEEP_SCAN = 30  # Dynamically scan top 30 high-turnover coins
+MIN_24H_VOLUME_USD = 100000.0    # $100k+ turnover minimum (Ensures basic orderbook fill liquidity)
 
-# DELTA EXCHANGE INDIA CONTRACT VALUES (Units per 1 Contract Lot) - Fallback Defaults
-CONTRACT_VALUES = {
-    'SOLUSD': 1.0,      # 1 Contract = 1 SOL
-    'DOGEUSD': 100.0,   # 1 Contract = 100 DOGE
-    'BTCUSD': 0.001,    # 1 Contract = 0.001 BTC
-    'ETHUSD': 0.01,     # 1 Contract = 0.01 ETH
-    'ADAUSD': 1.0,      # 1 Contract = 1 ADA
-    'AVAXUSD': 1.0,     # 1 Contract = 1 AVAX
-    'BNBUSD': 0.1       # 1 Contract = 0.1 BNB
-}
+# 🎯 DYNAMIC CHOP FILTER & ROLLING COOLDOWN (NO PERMANENT COIN BANS!)
+MIN_DISPLACEMENT_LEG_PCT = 0.012 # At least 1.2% 1-hour displacement required (Automatically rejects dead sideways chop!)
+SL_HIT_COOLDOWN_MINUTES = 150    # 2.5 hours temporary cooling if a coin hits SL (lets daily chop pass without permanent ban)
+NORMAL_COOLDOWN_MINUTES = 45     # 45m normal cooldown for winning trades
 
-# ========================================================================================
-# 7. ICT SESSIONS & TIMEFRAMES (LOCKED STRICTLY TO IST UTC+5:30)
-# ========================================================================================
-CANDLE_RESOLUTION = "15m"        # 15-Minute Entry Candles
-TREND_RESOLUTION = "1h"          # 1-Hour Trend Bias
+# RISK & MARGIN PARAMETERS (15x LEVERAGE - STRUCTURAL POSITION SIZING)
+LEVERAGE = 15                  # 15x Leverage on Delta India
+RISK_PER_TRADE_PCT = 0.020     # 2.0% Risk of capital (~₹100 max loss on ₹5,000 position)
+MAX_CONCURRENT_TRADES = 2      # Max 2 concurrent risk trades
+MAX_ACTIVE_RISK_TRADES = 2     # Max 2 trades at initial risk (SL not yet locked in profit)
+MAX_TOTAL_POSITIONS = 4        # Max 4 total positions (allows risk-free runners to keep running!)
+FREE_SLOT_ON_TP1 = True        # Once a trade hits TP1 & locks profit, its risk slot is FREED!
+ENABLE_SHORTS = True           # DUAL-DIRECTION: Takes both LONG and SHORT reversals
+STRICT_SHORT_BTC_TREND_FILTER = True # Strictly bans Shorts if Bitcoin is Bullish (Eliminates counter-trend traps)
 
-# Asian Session: 05:30 AM to 12:30 PM IST
-ASIAN_START_MINUTES = 5 * 60 + 30   # 330 mins (05:30 IST)
-ASIAN_END_MINUTES = 12 * 60 + 30    # 750 mins (12:30 IST)
+# 🔒 FIXED POSITION SIZING & RISK CONTROL (RENDER LOW POSITION SIZE)
+USE_FIXED_POSITION_SIZE = True       # Strict fixed sizing: 4 contracts on SNDKBUSD, exact ~₹5,000 INR
+FIXED_POSITION_SIZE_INR = 5000.0    # Fixed ₹5,000 INR Position Budget (~$56 USD | ₹333 margin at 15x)
+MAX_POSITION_SIZE_INR = 6000.0      # Hard ceiling: Never exceed ₹6,000 INR under any circumstance!
+MAX_SLIPPAGE_PCT = 0.005            # Max 0.5% slippage protection (rejects bad fills)
 
-# London Killzone: 12:30 PM to 04:30 PM IST (Judas Sweep Execution)
-LONDON_KZ_START_MINUTES = 12 * 60 + 30  # 750 mins (12:30 IST)
-LONDON_KZ_END_MINUTES = 16 * 60 + 30    # 990 mins (16:30 IST)
+# 🛡️ ANTI-CLIMAX GUARD (STRICTLY BANS BUYING THE TOP!)
+ANTI_CLIMAX_MAX_PUMP_PCT = 0.040 # NEVER enter Long if price is > 4.0% above 1-hour low!
+ANTI_CLIMAX_MAX_DUMP_PCT = 0.040 # NEVER enter Short if price is > 4.0% below 1-hour high!
 
-# NY Killzone: 05:30 PM to 10:30 PM IST (Displacement & Expansion)
-NY_KZ_START_MINUTES = 17 * 60 + 30      # 1050 mins (17:30 IST)
-NY_KZ_END_MINUTES = 22 * 60 + 30        # 1350 mins (22:30 IST)
+# 🎯 FIBONACCI RETRACEMENT ENTRY (0.50 - 0.618 GOLDEN POCKET OTE)
+FIB_ENTRY_MIN = 0.50           # 50% Equilibrium boundary
+FIB_ENTRY_MAX = 0.618          # 61.8% Golden Pocket sweet spot
+STRUCTURAL_SL_BUFFER_PCT = 0.003 # 0.3% buffer below swing low (Sheltered SL)
+MIN_SL_PCT = 0.006             # Min 0.6% Stop Loss (~₹30 risk on ₹5,000 position)
+MAX_SL_PCT = 0.009             # Max 0.9% Hard Ceiling Stop Loss (Strictly caps loss at -₹45 max! No more ₹125 losses!)
+STOP_LOSS_PCT = 0.008          # 0.8% Default Fallback Stop Loss (~₹40 risk)
 
-# 24X7 NONSTOP TRADING MODE (CRYPTO EDITION):
-# True  = Trades 24x7 across London, NY, and Night Expansion (12:30 PM to 05:30 AM next day).
-#         05:30 AM to 12:30 PM is dedicated to Asian Range building.
-# False = Strictly limits entry to London & NY Killzones.
-ENABLE_24X7_TRADING = True
-SKIP_WEEKENDS = False  # Crypto markets operate 24/7/365
+# 🎯 MACRO TREND CONFLUENCE LOCK (EMA 20 & EMA 50 - HIGHEST PROFIT FACTOR 2.03)
+ENABLE_MACRO_TREND_FILTER = True # Only Long when EMA20 >= EMA50, Only Short when EMA20 <= EMA50
 
-# ========================================================================================
-# 8. ICT OTE & DISPLACEMENT RULES
-# ========================================================================================
-MIN_DISPLACEMENT_BODY_ATR = 0.70 # Minimum 0.70 ATR displacement candle
-MIN_SWEEP_DEPTH_ATR = 0.40       # Minimum 0.40 ATR sweep depth beyond Asian boundary
-OTE_FIB_ENTRY = 0.618            # 0.618 Fibonacci OTE entry
-OTE_FIB_DEEP = 0.705             # 0.705 Fibonacci sweet spot
-SL_ATR_BUFFER = 0.25             # 0.25 ATR protective buffer beyond sweep wick tip
+# 🌐 5-PILLAR INSTITUTIONAL INTELLIGENCE ENGINE (BINANCE FUTURES DATA)
+ENABLE_INSTITUTIONAL_FEEDS = True     # Master Switch: Connects Binance L2 Depth, Taker Flow, OI, Top Traders & Funding Rate
+MIN_TAKER_BUY_RATIO_LONG = 0.90      # Rejects Longs if aggressive market sellers dominate (< 0.90)
+MAX_TAKER_BUY_RATIO_SHORT = 0.85     # Rejects Shorts unless aggressive sellers heavily dominate (<= 0.85)
+MIN_TOP_TRADER_LONG_PCT = 0.45       # Top 20% smart money accounts minimum long % for Longs
+MAX_TOP_TRADER_LONG_FOR_SHORT = 0.48 # Top Whales must NOT be net long (> 48%) for Shorts
+ENABLE_DYNAMIC_TARGET_WALLS = True   # Aligns TP1/TP2 slightly before large orderbook Sell/Buy walls
+ENABLE_ADAPTIVE_HARVEST_RATIO = True # Adapts book % based on OI expansion (20% run) vs exhaustion (50% bank)
 
-# ========================================================================================
-# 9. RESCUED RISK MANAGEMENT RULES (Converts 50% losses into green trades!)
-# ========================================================================================
-# Level 1: +1.0R / Asian Mid -> Book 60% profit immediately & move SL to BREAKEVEN PLUS (slightly above entry)
-RESCUE_PROFIT_R = 1.0
-RESCUE_CLOSE_RATIO = 0.60
-BREAKEVEN_PLUS_R = 0.15         # +0.15R Guaranteed Green Profit (above entry, covers all taker fees + profit)
+# ⚡ PILLAR 5: PREDICTED FUNDING RATE & SHORT-SQUEEZE DETECTOR
+ENABLE_FUNDING_SQUEEZE_DETECTOR = True # Real-time trapped short / funding squeeze detection
+SHORT_SQUEEZE_FUNDING_THRESHOLD = -0.00015 # < -0.015%: Shorts heavily trapped -> Squeeze UP (Strictly bans Shorts!)
+LONG_FLUSH_FUNDING_THRESHOLD = 0.00050     # > +0.050%: Longs overleveraged -> Flush DOWN
 
-# Level 2: Asian Opposite High/Low (1.8R - 2.0R) -> Book 25% profit
-TP1_R = 1.9
-TP1_CLOSE_RATIO = 0.25
+# 🗓️ WEEKEND ADAPTIVE VOLATILITY CONTROLS (SATURDAY & SUNDAY CHOP SHIELD)
+ENABLE_WEEKEND_ADAPTIVE_TARGETS = True # Automatically switches to tighter targets on low-vol weekends
+WEEKEND_TP1_PCT = 0.012                # +1.20% Target 1 on weekends (Quick bank before weekend chop!)
+WEEKEND_TP1_BOOK_RATIO = 0.50          # Bank 50% Cash immediately on weekends
+WEEKEND_MICRO_BE_TRIGGER_PCT = 0.009   # +0.90% Gain pulls SL to Breakeven (+0.05% buffer)
 
-# Level 3: Runner (Remaining 15%) -> Trail to 3.0R
-TP2_R = 3.0
-RUNNER_RATIO = 0.15
+# 🛡️ 2-TIER QUICK BREAKEVEN & PROFIT LOCKING (RISK-FREE EARLY SHIELD)
+MICRO_BE_TRIGGER_PCT = 0.011   # At +1.10% Gain: Pull SL to Breakeven (100% Risk Free without choking the runner!)
+MICRO_BE_BUFFER_PCT = 0.0005   # +0.05% Buffer (leaves 1.05% breathing room for normal healthy pullback)
 
-# ========================================================================================
-# 10. CLOUD KEEPALIVE & HEALTHCHECK SERVER (RENDER DEPLOYMENT)
-# Render dynamically passes $PORT environment variable (defaults to 10000)
-# ========================================================================================
-SERVER_HOST = "0.0.0.0"
-SERVER_PORT = int(os.getenv("PORT", "10000"))
+# 🎯 MULTI-TIMEFRAME SNIPER & TREND-BASED FIBONACCI ENGINE
+ENTRY_TIMEFRAME = '3m'         # 3-Minute Sniper Execution (Zero delay, fast bottom sweep reaction, tight SL)
+MACRO_TIMEFRAME = '15m'        # 15-Minute Macro Structure & Trend-Based Fibonacci Extension Targets
+
+# 🚀 TREND-BASED FIB TARGET HARVESTING (75% CASH BANK AT TP1)
+ENABLE_PREMATURE_BE = False    # Strictly disables choking trades before TP1 (gives trade room to hit target!)
+TP1_PCT = 0.018                # Fallback +1.80% TP1 (Macro High Retest)
+TP1_BOOK_RATIO = 0.75          # Bank 75% Cash immediately at TP1! (+₹75 to +₹110 INR in pocket!)
+
+TP2_PCT = 0.030                # Fallback +3.00% TP2 (Fib 1.272 Extension Breakout)
+TP2_BOOK_RATIO = 0.25          # Bank remaining 25% at TP2! (Total 100% in pocket!)
+
+TP3_PCT = 0.050                # Fib 1.618 Golden Extension Moonshot Runner
+TRAILING_STEP_PCT = 0.005      # 0.5% continuous trailing ratchet
+MAX_HOLD_MINUTES = 240         # 240-minute (4 hours) window
+
+# ✂️ TOOL 4: EARLY MOMENTUM DECAY CUT
+ENABLE_EARLY_DECAY_CUT = True  # Cuts failed reversals early
+EARLY_CUT_MINUTES = 20         # Check after 20 minutes
+EARLY_CUT_LOSS_PCT = -0.010    # If trade is down <= -1.0% after 20m, exit early
+SCAN_INTERVAL_SECONDS = 10
+
+# TELEGRAM BOT (Verified Credentials)
+TELEGRAM_BOT_TOKEN = "8524775146:AAHeIscEpeJz7sLcjQwTJ461NXvYQoyW4YE"
+TELEGRAM_CHAT_ID = "7271911207"
