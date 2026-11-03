@@ -51,80 +51,131 @@ def send_alert(message):
             return None
 
 def notify_entry(trade):
-    """Sends entry alert with full ICT parameters formatted in INR (₹)."""
-    side_icon = "🟢 *LONG*" if trade['side'] == 'LONG' else "🔴 *SHORT*"
+    """Sends entry alert with clear Hindi / English parameters formatted in INR (₹)."""
+    side = trade['side']
+    side_icon = "🟢 *BUY (LONG)*" if side == 'LONG' else "🔴 *SELL (SHORT)*"
+    total_c = trade.get('total_contracts', 1)
+    e1 = trade.get('exit_1_contracts', 0)
+    e2 = trade.get('exit_2_contracts', 0)
+    e3 = trade.get('exit_3_contracts', 0)
+    
+    p1 = int(round((e1 / total_c) * 100)) if total_c > 0 and e1 > 0 else 0
+    p2 = int(round((e2 / total_c) * 100)) if total_c > 0 and e2 > 0 else (100 if total_c == 1 else 0)
+    p3 = 100 - p1 - p2 if (p1 + p2) < 100 else 0
+
     msg = (
-        f"🎯 *[NEW ICT SNIPER ENTRY]* {side_icon}\n"
-        f"═══════════════════════\n"
-        f"🪙 Asset: *{trade['symbol']}*\n"
-        f"📍 Entry (0.618 OTE): *${trade['entry_price']:.4f}* (~₹{trade['entry_inr_est']:,.2f})\n"
-        f"🛡️ Initial Stop-Loss: *${trade['sl_price']:.4f}*\n"
-        f"💰 Risk Amount (2%): *{config.format_inr(trade['risk_inr'])}*\n"
-        f"💼 20x Margin Locked: *{config.format_inr(trade['margin_used_inr'])}*\n"
-        f"═══════════════════════\n"
-        f"🛡️ Rescue Level (+1R): *${trade['rescue_tp']:.4f}* (30% Profit + BE Lock)\n"
-        f"🎯 Asian Target 1: *${trade['tp1_price']:.4f}* (40% Profit)\n"
-        f"🚀 Target 2 Runner: *${trade['tp2_price']:.4f}* (30% Runner)\n"
-        f"🕒 Time: `{trade['entry_time']}` IST\n"
-        f"💡 _Setup: {trade.get('setup_type', 'ICT_OTE')}_"
+        f"🎯 *[NEW TRADE OPENED / नया ट्रेड]* 🚀\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 कॉइन: *{trade['symbol']}*\n"
+        f"📈 दिशा (Side): {side_icon}\n"
+        f"📍 एंट्री प्राइस: *${trade['entry_price']:.4f}* (~₹{trade['entry_inr_est']:,.2f})\n"
+        f"🛑 स्टॉप लॉस (SL): *${trade['sl_price']:.4f}*\n"
+        f"💼 पोजीशन साइज़: *{config.format_inr(trade['position_inr'])}* ({total_c} Contracts)\n"
+        f"💳 मार्जिन लगा (20x): *{config.format_inr(trade['margin_used_inr'])}*\n"
+        f"⚠️ मैक्स रिस्क (SL पर): *{config.format_inr(trade['risk_inr'])}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 *प्रॉफ़िट बुकिंग प्लान (Exit Targets):*\n"
+        f"  1️⃣ Rescue (+1.0R): *${trade['rescue_tp']:.4f}* ➔ *{p1}% Book ({e1}c)* + Breakeven Plus\n"
+        f"  2️⃣ Asian Target 1: *${trade['tp1_price']:.4f}* ➔ *{p2}% Book ({e2}c)*\n"
+        f"  3️⃣ Home Run TP2:  *${trade['tp2_price']:.4f}* ➔ *{p3}% Runner ({e3}c)*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🕒 समय: `{trade['entry_time']}` IST"
     )
     send_alert(msg)
 
 def notify_rescue_hit(trade, pnl_rescue_inr):
     """Alerts when Level 1 (+1.0R / Asian Mid) is hit and SL is locked to Breakeven Plus."""
+    total_c = max(1, trade.get('total_contracts', 1))
+    e1 = trade.get('exit_1_contracts', 0)
+    pct_booked = int(round((e1 / total_c) * 100)) if e1 > 0 else 60
+    rem_c = trade.get('remaining_contracts', total_c - e1)
+    rem_pct = 100 - pct_booked
     sl_px = trade.get('sl_price', trade['entry_price'])
+    side = trade.get('side', 'LONG')
+    profit_buffer_pct = abs(sl_px - trade['entry_price']) / trade['entry_price'] * 100
+
     msg = (
-        f"🛡️ *[RESCUE LEVEL 1 HIT - 60% BOOKED]* 💰\n"
-        f"═══════════════════════\n"
-        f"🪙 Asset: *{trade['symbol']}*\n"
-        f"💵 Heavy Profit Secured (60%): *+{config.format_inr(pnl_rescue_inr)}*\n"
-        f"🔒 *SL Shifted to BREAKEVEN PLUS (${sl_px:.4f})*\n"
-        f"🛡️ Remaining 40% is *100% IN GUARANTEED GREEN PROFIT*!\n"
-        f"🕒 Time: `{config.get_now_ist().strftime('%H:%M:%S')}` IST"
+        f"🛡️ *[RESCUE LEVEL 1 HIT - 60% मुनाफ़ा बुक]* 💰\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 कॉइन: *{trade['symbol']}* ({side})\n"
+        f"💵 *इस लेवल पर बुक हुआ:* *{pct_booked}% ({e1} Contracts)*\n"
+        f"💰 *इस लेवल का मुनाफ़ा:* *+{config.format_inr(pnl_rescue_inr)}* ✅\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔒 *सुरक्षा (Protection Active):*\n"
+        f"  • स्टॉप लॉस लॉक: *BREAKEVEN PLUS* (${sl_px:.4f})\n"
+        f"  • यह एंट्री से *+{profit_buffer_pct:.2f}% ऊपर* प्रॉफ़िट में है!\n"
+        f"  • बचा हुआ हिस्सा: *{rem_pct}% ({rem_c} Contracts) रिस्क-फ़्री चल रहा है!*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🕒 समय: `{config.get_now_ist().strftime('%I:%M:%S %p')}` IST"
     )
     send_alert(msg)
 
 def notify_tp1_hit(trade, pnl_tp1_inr, new_sl):
     """Alerts when Target 1 (Asian High/Low) hits and trails SL into profit."""
+    total_c = max(1, trade.get('total_contracts', 1))
+    e2 = trade.get('exit_2_contracts', 0)
+    pct_booked = int(round((e2 / total_c) * 100)) if e2 > 0 else 25
+    rem_c = trade.get('remaining_contracts', 0)
+    total_realized_trade = trade.get('realized_pnl_inr', pnl_tp1_inr)
+
     msg = (
-        f"🎯 *[ASIAN TARGET 1 HIT - 25% BOOKED]* 💰\n"
-        f"═══════════════════════\n"
-        f"🪙 Asset: *{trade['symbol']}*\n"
-        f"💵 Target 1 Profit (25%): *+{config.format_inr(pnl_tp1_inr)}*\n"
-        f"📈 *Trailing SL locked in HIGHER PROFIT at ${new_sl:.4f}*\n"
-        f"🚀 15% Runner open for Target 2 Home Run!\n"
-        f"🕒 Time: `{config.get_now_ist().strftime('%H:%M:%S')}` IST"
+        f"🎯 *[ASIAN TARGET 1 HIT - 25% और बुक]* 💰\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 कॉइन: *{trade['symbol']}*\n"
+        f"💵 *इस लेवल पर बुक हुआ:* *{pct_booked}% ({e2} Contracts)*\n"
+        f"💰 *Target 1 का मुनाफ़ा:* *+{config.format_inr(pnl_tp1_inr)}* ✅\n"
+        f"🏆 *इस ट्रेड का अब तक कुल मुनाफ़ा:* *+{config.format_inr(total_realized_trade)}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📈 *ट्रेलिंग सुरक्षा (Trailing SL Locked):*\n"
+        f"  • नया सुरक्षित SL: *${new_sl:.4f}* (+1.0R बड़े प्रॉफ़िट में)\n"
+        f"  • अंतिम रनर: *{rem_c} Contract(s)* Home Run (TP2) के लिए खुला है!\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🕒 समय: `{config.get_now_ist().strftime('%I:%M:%S %p')}` IST"
     )
     send_alert(msg)
 
 def notify_tp2_hit(trade, total_pnl_inr):
     """Alerts when Target 2 Runner (3.0R) hits."""
     msg = (
-        f"🚀 *[TARGET 2 RUNNER HIT - HOME RUN!]* 🏆\n"
-        f"═══════════════════════\n"
-        f"🪙 Asset: *{trade['symbol']}*\n"
-        f"💰 Total Realized PnL: *+{config.format_inr(total_pnl_inr)}*\n"
-        f"🎉 Position fully closed with massive profit!\n"
-        f"🕒 Time: `{config.get_now_ist().strftime('%H:%M:%S')}` IST"
+        f"🚀 *[TARGET 2 FULL WIN - HOME RUN!]* 🏆🎉\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 कॉइन: *{trade['symbol']}* ({trade.get('side', '')})\n"
+        f"🎯 सभी 3 लेवल्स पूरे हुए (100% Position Closed)!\n"
+        f"💰 *इस ट्रेड का अंतिम कुल मुनाफ़ा:* *+{config.format_inr(total_pnl_inr)}* 🚀\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🕒 समय: `{config.get_now_ist().strftime('%I:%M:%S %p')}` IST"
     )
     send_alert(msg)
 
 def notify_sl_hit(trade, total_pnl_inr, reason):
     """Alerts when Stop Loss or Breakeven exit triggers."""
+    exit_px = trade.get('exit_price', trade.get('sl_price', 0))
+    entry_px = trade.get('entry_price', 0)
+    side = trade.get('side', 'LONG')
+
     if "BREAKEVEN" in reason or total_pnl_inr >= 0:
-        icon = "🛡️ *[BREAKEVEN EXIT - PROTECTED]*"
-        verdict = f"✅ Secured Profit: *+{config.format_inr(total_pnl_inr)}* (Zero Loss!)"
+        icon = "🛡️ *[TRADE CLOSED - BREAKEVEN PLUS PROTECTED]*"
+        verdict = (
+            f"✅ *ट्रेड मुनाफ़े में सुरक्षित क्लोज़ हुआ!*\n"
+            f"💰 *इस ट्रेड का कुल शुद्ध मुनाफ़ा:* *+{config.format_inr(total_pnl_inr)}*\n"
+            f"💡 _(मार्केट पलटने के बावजूद Breakeven Plus ने मुनाफ़ा लॉक रखा!)_"
+        )
     else:
-        icon = "❌ *[STOP LOSS TRIGGERED]*"
-        verdict = f"🔻 Loss: *-{config.format_inr(abs(total_pnl_inr))}*"
+        loss_val = abs(total_pnl_inr)
+        icon = "🛑 *[STOP LOSS HIT - ट्रेड क्लोज़]*"
+        verdict = (
+            f"🔻 *नुक़सान (Loss):* *-{config.format_inr(loss_val)}*\n"
+            f"💡 _(सख्त रिस्क मैनेजमेंट: अकाउंट का केवल ~₹50-₹65 ही लगा था)_"
+        )
 
     msg = (
         f"{icon}\n"
-        f"═══════════════════════\n"
-        f"🪙 Asset: *{trade['symbol']}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 कॉइन: *{trade['symbol']}* ({side})\n"
         f"{verdict}\n"
-        f"📍 Exit Price: *${trade.get('exit_price', 0):.4f}*\n"
-        f"🕒 Time: `{config.get_now_ist().strftime('%H:%M:%S')}` IST"
+        f"📍 एंट्री: *${entry_px:.4f}* ➔ एग्जिट: *${exit_px:.4f}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🕒 समय: `{config.get_now_ist().strftime('%I:%M:%S %p')}` IST"
     )
     send_alert(msg)
 
