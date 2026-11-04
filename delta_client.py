@@ -166,7 +166,8 @@ class DeltaClient:
         if max_spread_pct is None:
             max_spread_pct = getattr(config, 'DYNAMIC_MAX_SPREAD_PCT', 0.0020)
 
-        core_staples = getattr(config, 'CORE_STAPLES', ['SOLUSD', 'DOGEUSD', 'BTCUSD', 'ETHUSD', 'ADAUSD', 'AVAXUSD', 'BNBUSD'])
+        core_staples = getattr(config, 'CORE_STAPLES', ['SOLUSD', 'DOGEUSD', 'XRPUSD', 'ADAUSD', 'AVAXUSD', 'LINKUSD', 'UNIUSD', 'RUNEUSD'])
+        excluded_keywords = getattr(config, 'EXCLUDED_KEYWORDS', ['PAXG', 'XAUT', 'GOLD', 'SILVER', 'SLV', 'OIL', 'US500', 'SPX', 'QQQ', 'AAPL', 'TSLA', 'NVDA', 'MSFT', 'AMZN'])
 
         # Refresh product lot size specs if needed
         if not self.bstock_symbols or len(self.contract_values) < 20:
@@ -187,6 +188,10 @@ class DeltaClient:
 
                 symbol = t.get("symbol")
                 if not symbol or symbol in self.bstock_symbols:
+                    continue
+
+                # Strictly ban commodities, metals, and low-volatility non-crypto assets
+                if any(ex in symbol.upper() for ex in excluded_keywords):
                     continue
 
                 try:
@@ -325,10 +330,10 @@ class DeltaClient:
             print(f"⚠️ [MARGIN BUFFER] Free capital ({config.format_inr(free_capital)}) is below minimum buffer (₹400). Skipping {symbol}.")
             return None
 
-        # STRICT FIXED SIZING: Fixed ₹9,000 - ₹10,000 per trade (Compounding STOPPED)
-        # Position size will NEVER exceed ₹10,000 INR regardless of capital or tight SL
-        target_pos_inr = getattr(config, 'TARGET_POSITION_INR', 9500.0)
-        max_pos_inr = getattr(config, 'MAX_POSITION_INR', 10000.0)
+        # STRICT FIXED SIZING: Fixed ₹15,000 Position Size (Non-Compounding)
+        # Position size will strictly target ₹15,000 INR with a hard ceiling of ₹16,000 INR
+        target_pos_inr = getattr(config, 'TARGET_POSITION_INR', 15000.0)
+        max_pos_inr = getattr(config, 'MAX_POSITION_INR', 16000.0)
         
         target_pos_usd = target_pos_inr / config.USD_INR_RATE
         raw_contracts = target_pos_usd / contract_unit_usd
@@ -541,6 +546,7 @@ class DeltaClient:
             trade["exit_price"] = exit_px
             trade["final_pnl_inr"] = final_pnl_inr
             trade["close_reason"] = reason
+            trade["exit_reason"] = reason
 
             self.state["closed_trades"].append(trade)
             self.save_state()

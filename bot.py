@@ -206,7 +206,7 @@ class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
                     <td class="{side_cls}">{ct.get('side')}</td>
                     <td>${ct.get('entry_price', 0):.4f}</td>
                     <td>${ct.get('exit_price', 0):.4f}</td>
-                    <td><small>{ct.get('exit_reason', ct.get('reason', '-'))}</small></td>
+                    <td><small>{ct.get('exit_reason', ct.get('close_reason', ct.get('reason', '-')))}</small></td>
                     <td class="{pnl_cls}">+{config.format_inr(pnl_val)}</td>
                 </tr>
                 """

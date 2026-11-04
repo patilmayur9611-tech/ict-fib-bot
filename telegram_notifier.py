@@ -87,27 +87,42 @@ def notify_rescue_hit(trade, pnl_rescue_inr):
     """Alerts when Level 1 (+1.0R / Asian Mid) is hit and SL is locked to Breakeven Plus."""
     total_c = max(1, trade.get('total_contracts', 1))
     e1 = trade.get('exit_1_contracts', 0)
-    pct_booked = int(round((e1 / total_c) * 100)) if e1 > 0 else 60
-    rem_c = trade.get('remaining_contracts', total_c - e1)
-    rem_pct = 100 - pct_booked
     sl_px = trade.get('sl_price', trade['entry_price'])
     side = trade.get('side', 'LONG')
     profit_buffer_pct = abs(sl_px - trade['entry_price']) / trade['entry_price'] * 100
 
-    msg = (
-        f"🛡️ *[RESCUE LEVEL 1 HIT - 60% मुनाफ़ा बुक]* 💰\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🪙 कॉइन: *{trade['symbol']}* ({side})\n"
-        f"💵 *इस लेवल पर बुक हुआ:* *{pct_booked}% ({e1} Contracts)*\n"
-        f"💰 *इस लेवल का मुनाफ़ा:* *+{config.format_inr(pnl_rescue_inr)}* ✅\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔒 *सुरक्षा (Protection Active):*\n"
-        f"  • स्टॉप लॉस लॉक: *BREAKEVEN PLUS* (${sl_px:.4f})\n"
-        f"  • यह एंट्री से *+{profit_buffer_pct:.2f}% ऊपर* प्रॉफ़िट में है!\n"
-        f"  • बचा हुआ हिस्सा: *{rem_pct}% ({rem_c} Contracts) रिस्क-फ़्री चल रहा है!*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🕒 समय: `{config.get_now_ist().strftime('%I:%M:%S %p')}` IST"
-    )
+    if e1 == 0 or total_c == 1:
+        msg = (
+            f"🛡️ *[RESCUE LEVEL 1 HIT - BREAKEVEN PLUS LOCKED]* 🔒\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🪙 कॉइन: *{trade['symbol']}* ({side})\n"
+            f"ℹ️ *लॉट साइज़:* 1 Contract (डेल्टा एक्सचेंज पर 1 लॉट को आधा नहीं काटा जा सकता)\n"
+            f"🔒 *सुरक्षा एक्टिव:* पूरा 1 कॉन्ट्रैक्ट अब 100% *RISK-FREE* है!\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📈 *नया स्टॉप लॉस (Breakeven Plus):* *${sl_px:.4f}*\n"
+            f"  • यह एंट्री (${trade['entry_price']:.4f}) से *+{profit_buffer_pct:.2f}% प्रॉफ़िट* में लॉक है!\n"
+            f"🎯 *अगला कदम:* यह पूरा कॉन्ट्रैक्ट Target 1 (${trade['tp1_price']:.4f}) पर 100% बड़े मुनाफ़े के लिए राइड कर रहा है!\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🕒 समय: `{config.get_now_ist().strftime('%I:%M:%S %p')}` IST"
+        )
+    else:
+        pct_booked = int(round((e1 / total_c) * 100))
+        rem_c = trade.get('remaining_contracts', total_c - e1)
+        rem_pct = 100 - pct_booked
+        msg = (
+            f"🛡️ *[RESCUE LEVEL 1 HIT - 60% मुनाफ़ा बुक]* 💰\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🪙 कॉइन: *{trade['symbol']}* ({side})\n"
+            f"💵 *इस लेवल पर बुक हुआ:* *{pct_booked}% ({e1} Contracts)*\n"
+            f"💰 *इस लेवल का मुनाफ़ा:* *+{config.format_inr(pnl_rescue_inr)}* ✅\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔒 *सुरक्षा (Protection Active):*\n"
+            f"  • स्टॉप लॉस लॉक: *BREAKEVEN PLUS* (${sl_px:.4f})\n"
+            f"  • यह एंट्री से *+{profit_buffer_pct:.2f}% ऊपर* प्रॉफ़िट में है!\n"
+            f"  • बचा हुआ हिस्सा: *{rem_pct}% ({rem_c} Contracts) रिस्क-फ़्री चल रहा है!*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🕒 समय: `{config.get_now_ist().strftime('%I:%M:%S %p')}` IST"
+        )
     send_alert(msg)
 
 def notify_tp1_hit(trade, pnl_tp1_inr, new_sl):
@@ -153,19 +168,24 @@ def notify_sl_hit(trade, total_pnl_inr, reason):
     entry_px = trade.get('entry_price', 0)
     side = trade.get('side', 'LONG')
 
-    if "BREAKEVEN" in reason or total_pnl_inr >= 0:
-        icon = "🛡️ *[TRADE CLOSED - BREAKEVEN PLUS PROTECTED]*"
+    if total_pnl_inr > 0 or "BREAKEVEN_PLUS" in reason or "TRAILING" in reason:
+        icon = "🎉 *[TRADE CLOSED IN GREEN PROFIT / मुनाफ़ा बुक होकर क्लोज़]* 💰"
         verdict = (
-            f"✅ *ट्रेड मुनाफ़े में सुरक्षित क्लोज़ हुआ!*\n"
-            f"💰 *इस ट्रेड का कुल शुद्ध मुनाफ़ा:* *+{config.format_inr(total_pnl_inr)}*\n"
+            f"✅ *शुद्ध मुनाफ़ा जेब में लॉक:* *+{config.format_inr(total_pnl_inr)}* 🚀\n"
             f"💡 _(मार्केट पलटने के बावजूद Breakeven Plus ने मुनाफ़ा लॉक रखा!)_"
+        )
+    elif total_pnl_inr == 0:
+        icon = "🛡️ *[TRADE CLOSED AT BREAKEVEN / नो प्रॉफ़िट नो लॉस]*"
+        verdict = (
+            f"✅ *सुरक्षित एग्जिट:* *₹0.00* (कोई नुक़सान नहीं!)\n"
+            f"💡 _(मार्केट पलटा लेकिन Breakeven ने कैपिटल को सुरक्षित बचा लिया)_"
         )
     else:
         loss_val = abs(total_pnl_inr)
-        icon = "🛑 *[STOP LOSS HIT - ट्रेड क्लोज़]*"
+        icon = "🛑 *[STOP LOSS HIT / ट्रेड क्लोज़]*"
         verdict = (
             f"🔻 *नुक़सान (Loss):* *-{config.format_inr(loss_val)}*\n"
-            f"💡 _(सख्त रिस्क मैनेजमेंट: अकाउंट का केवल ~₹50-₹65 ही लगा था)_"
+            f"💡 _(सख्त रिस्क मैनेजमेंट: अकाउंट का केवल ~₹47-₹50 ही लगा था)_"
         )
 
     msg = (

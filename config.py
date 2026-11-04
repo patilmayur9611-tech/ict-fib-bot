@@ -54,9 +54,9 @@ MAX_ACTIVE_CAPITAL_INR = float(os.getenv("MAX_ACTIVE_CAPITAL_INR", "100000.0")) 
 RISK_PER_TRADE_PCT = 0.025        # 2.5% risk per trade (e.g. ₹50 risk on ₹2,000 capital)
 LEVERAGE = 20                    # 20x Leverage (Isolated Margin)
 MAX_CONCURRENT_TRADES = 3        # Maximum simultaneous open trades
-TARGET_POSITION_INR = float(os.getenv("TARGET_POSITION_INR", "9500.0"))  # Target ₹9,500 Position Size (~₹475 margin at 20x)
-MIN_POSITION_INR = 9000.0                                                # ₹9,000 Minimum Floor
-MAX_POSITION_INR = 10000.0                                               # ₹10,000 STRICT Maximum Hard Cap (Compounding STOPPED)
+TARGET_POSITION_INR = float(os.getenv("TARGET_POSITION_INR", "15000.0")) # Target ₹15,000 Position Size (~₹750 margin at 20x)
+MIN_POSITION_INR = 12000.0                                               # ₹12,000 Minimum Floor
+MAX_POSITION_INR = 16000.0                                               # ₹16,000 STRICT Maximum Hard Cap (Non-Compounding)
 
 def format_inr(amount):
     """Formats currency into Indian Rupee format."""
@@ -72,15 +72,21 @@ DYNAMIC_MIN_VOLUME_USD = 500000.0          # $500,000 (~₹4.5 Crore) minimum 24
 DYNAMIC_MAX_SPREAD_PCT = 0.0020            # 0.20% maximum bid-ask spread
 DYNAMIC_REFRESH_INTERVAL_SECONDS = 3600    # Refresh top universe every 1 hour (3600s)
 
-# Core staples always included in active universe
+# Core staples always included in active universe (High-volatility, explosive altcoins)
 CORE_STAPLES = [
-    'SOLUSD',    # Solana
-    'DOGEUSD',   # Dogecoin
-    'BTCUSD',    # Bitcoin
-    'ETHUSD',    # Ethereum
-    'ADAUSD',    # Cardano
-    'AVAXUSD',   # Avalanche
-    'BNBUSD'     # BNB
+    'SOLUSD',    # Solana (High Volatility)
+    'DOGEUSD',   # Dogecoin (High Volatility)
+    'XRPUSD',    # Ripple (High Volatility)
+    'ADAUSD',    # Cardano (High Volatility)
+    'AVAXUSD',   # Avalanche (High Volatility)
+    'LINKUSD',   # Chainlink (High Volatility)
+    'UNIUSD',    # Uniswap (High Volatility)
+    'RUNEUSD'    # Thorchain (Very High Volatility - 2.5x Move)
+]
+
+# Excluded Non-Crypto / Low-Volatility Assets (Gold, Silver, Oil, Stock tokens)
+EXCLUDED_KEYWORDS = [
+    'PAXG', 'XAUT', 'GOLD', 'SILVER', 'SLV', 'OIL', 'US500', 'SPX', 'QQQ', 'AAPL', 'TSLA', 'NVDA', 'MSFT', 'AMZN'
 ]
 
 # Fallback default universe if offline
@@ -137,7 +143,7 @@ SL_ATR_BUFFER = 0.25             # 0.25 ATR protective buffer beyond sweep wick 
 # Level 1: +1.0R / Asian Mid -> Book 60% profit immediately & move SL to BREAKEVEN PLUS (slightly above entry)
 RESCUE_PROFIT_R = 1.0
 RESCUE_CLOSE_RATIO = 0.60
-BREAKEVEN_PLUS_R = 0.15         # +0.15R Guaranteed Green Profit (above entry, covers all taker fees + profit)
+BREAKEVEN_PLUS_R = 0.40         # +0.40R Guaranteed Solid Profit on reversal exit (no more ₹4!)
 
 # Level 2: Asian Opposite High/Low (1.8R - 2.0R) -> Book 25% profit
 TP1_R = 1.9
