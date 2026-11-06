@@ -15,8 +15,18 @@ import hmac
 import hashlib
 import datetime
 import os
+from decimal import Decimal, ROUND_HALF_UP
 import config
 import telegram_notifier
+
+def round_to_tick(price, tick_size_str):
+    try:
+        d_price = Decimal(str(price))
+        d_tick = Decimal(str(tick_size_str))
+        rounded = (d_price / d_tick).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * d_tick
+        return format(rounded, 'f')
+    except Exception:
+        return str(round(price, 4))
 
 class DeltaClient:
     def __init__(self):
@@ -27,6 +37,11 @@ class DeltaClient:
         self.active_universe = list(getattr(config, 'SYMBOLS', []))
         self.bstock_symbols = set()
         self.last_screener_refresh = 0
+        self.api_key = os.getenv('DELTA_INDIA_API_KEY', getattr(config, 'DELTA_API_KEY', ''))
+        self.api_secret = os.getenv('DELTA_INDIA_API_SECRET', getattr(config, 'DELTA_API_SECRET', ''))
+        self.paper_mode = getattr(config, 'PAPER_TRADING', True)
+        self.product_ids = {}
+        self.tick_sizes = {}
         self.load_state()
 
     def load_state(self):
@@ -67,6 +82,56 @@ class DeltaClient:
                 json.dump(self.state, f, indent=4)
         except Exception as e:
             print(f"[STATE SAVE ERROR] {e}")
+
+    def _api_request(self, method, path, query_params=None, payload_dict=None):
+        """Authenticated HMAC-SHA256 Request for Delta Exchange India Real Trading."""
+        if not self.api_key or not self.api_secret or self.api_key.startswith('YOUR_'):
+            return {"error": "Missing or placeholder Delta API Key/Secret"}
+
+        url = f"{self.base_url}{path}"
+        if query_params:
+            url += f"?{urllib.parse.urlencode(query_params)}"
+
+        payload_str = json.dumps(payload_dict, separators=(",", ":")) if payload_dict else ""
+        timestamp = str(int(time.time()))
+        signature_data = method + timestamp + path + (f"?{urllib.parse.urlencode(query_params)}" if query_params else "") + payload_str
+        signature = hmac.new(
+            self.api_secret.encode('utf-8'),
+            signature_data.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+
+        headers = {
+            "api-key": self.api_key,
+            "timestamp": timestamp,
+            "signature": signature,
+            "User-Agent": "Mozilla/5.0",
+            "Content-Type": "application/json"
+        }
+
+        data = payload_str.encode('utf-8') if payload_str else None
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+
+        try:
+            with urllib.request.urlopen(req, timeout=12) as r:
+                return json.loads(r.read().decode('utf-8'))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode('utf-8', errors='ignore')
+            print(f"[DELTA API HTTP ERROR] {method} {path} -> HTTP {e.code}: {body}")
+            return {"error": f"HTTP {e.code}", "body": body}
+        except Exception as e:
+            print(f"[DELTA API NETWORK ERROR] {method} {path} -> {e}")
+            return {"error": str(e)}
+
+    def cancel_product_orders(self, product_id):
+        """Cancels open orders for a product on Delta Exchange India."""
+        if not self.paper_mode and self.api_key and self.api_secret and product_id:
+            try:
+                res = self._api_request("DELETE", "/v2/orders/all", query_params={"product_id": int(product_id)})
+                return res.get("success", False)
+            except Exception as e:
+                print(f"[CANCEL ORDERS ERROR] {e}")
+        return False
 
     def fetch_candles(self, symbol, resolution="15m", limit=60):
         """
@@ -134,6 +199,10 @@ class DeltaClient:
                 for p in products:
                     if p.get("contract_type") == "perpetual_futures":
                         sym = p.get("symbol")
+                        pid = p.get("id")
+                        if pid:
+                            self.product_ids[sym] = pid
+                        self.tick_sizes[sym] = str(p.get("tick_size", "0.01"))
                         try:
                             cv = float(p.get("contract_value", 1.0))
                             self.contract_values[sym] = cv
@@ -354,8 +423,75 @@ class DeltaClient:
         entry_inr_est = entry_price * config.USD_INR_RATE
         actual_risk_inr = actual_position_inr * sl_pct
 
+        prod_id = self.product_ids.get(symbol)
+        api_order_id = None
+        sl_order_id = None
+
+        if not self.paper_mode:
+            if not prod_id:
+                self.fetch_product_specs()
+                prod_id = self.product_ids.get(symbol)
+
+            if not prod_id:
+                print(f"❌ [REAL ORDER ABORT] Missing product_id for {symbol}. Order skipped.")
+                return None
+
+            api_side = "buy" if side == "LONG" else "sell"
+            market_payload = {
+                "product_id": int(prod_id),
+                "product_symbol": symbol,
+                "size": int(total_contracts),
+                "side": api_side,
+                "order_type": "market_order"
+            }
+            order_res = self._api_request("POST", "/v2/orders", payload_dict=market_payload)
+            if "error" in order_res or not order_res.get("success", False):
+                print(f"❌ [DELTA API REJECTION] Real Order Failed for {symbol}: {order_res}")
+                return None
+
+            api_order_id = order_res.get("result", {}).get("id")
+            fill_px = order_res.get("result", {}).get("average_fill_price")
+            if fill_px:
+                try:
+                    entry_price = float(fill_px)
+                except (ValueError, TypeError):
+                    pass
+
+            # Attach Stop Loss immediately on exchange
+            sl_side = "sell" if side == "LONG" else "buy"
+            tick_sz = self.tick_sizes.get(symbol, "0.01")
+            sl_rounded_str = round_to_tick(sl_price, tick_sz)
+            sl_payload = {
+                "product_id": int(prod_id),
+                "product_symbol": symbol,
+                "size": int(total_contracts),
+                "side": sl_side,
+                "order_type": "market_order",
+                "stop_order_type": "stop_loss_order",
+                "stop_price": sl_rounded_str,
+                "stop_trigger_method": "mark_price",
+                "reduce_only": True
+            }
+            sl_res = self._api_request("POST", "/v2/orders", payload_dict=sl_payload)
+            if not sl_res.get("success", False):
+                print(f"🚨 [SAFETY BAILOUT] Stop Loss failed to attach for {symbol}! Emergency closing position...")
+                close_side = "sell" if side == "LONG" else "buy"
+                self._api_request("POST", "/v2/orders", payload_dict={
+                    "product_id": int(prod_id),
+                    "product_symbol": symbol,
+                    "size": int(total_contracts),
+                    "side": close_side,
+                    "order_type": "market_order",
+                    "reduce_only": True
+                })
+                return None
+            sl_order_id = sl_res.get("result", {}).get("id")
+
         now_str = config.get_now_ist().strftime('%Y-%m-%d %H:%M:%S')
         trade = {
+            "product_id": prod_id,
+            "api_order_id": api_order_id,
+            "sl_order_id": sl_order_id,
             "symbol": symbol,
             "side": side,
             "entry_time": now_str,
@@ -442,6 +578,34 @@ class DeltaClient:
                     be_plus_buffer = getattr(config, 'BREAKEVEN_PLUS_R', 0.15) * r_dist
                     trade["sl_price"] = (entry_price + be_plus_buffer) if side == "LONG" else (entry_price - be_plus_buffer)
 
+                    # Real Money Execution on Delta Exchange India
+                    prod_id = trade.get("product_id") or self.product_ids.get(symbol)
+                    if not self.paper_mode and prod_id and exit_contracts > 0:
+                        close_side = "sell" if side == "LONG" else "buy"
+                        self._api_request("POST", "/v2/orders", payload_dict={
+                            "product_id": int(prod_id),
+                            "product_symbol": symbol,
+                            "size": int(exit_contracts),
+                            "side": close_side,
+                            "order_type": "market_order",
+                            "reduce_only": True
+                        })
+                        self.cancel_product_orders(prod_id)
+                        rem_c = trade.get("remaining_contracts", total_c)
+                        if rem_c > 0:
+                            be_sl_str = round_to_tick(trade["sl_price"], self.tick_sizes.get(symbol, "0.01"))
+                            self._api_request("POST", "/v2/orders", payload_dict={
+                                "product_id": int(prod_id),
+                                "product_symbol": symbol,
+                                "size": int(rem_c),
+                                "side": close_side,
+                                "order_type": "market_order",
+                                "stop_order_type": "stop_loss_order",
+                                "stop_price": be_sl_str,
+                                "stop_trigger_method": "mark_price",
+                                "reduce_only": True
+                            })
+
                     self.save_state()
                     telegram_notifier.notify_rescue_hit(trade, pnl_rescue_inr)
                     print(f"🛡️ [RESCUED TRIGGERED] {symbol} closed {exit_contracts} contract(s) (+{config.format_inr(pnl_rescue_inr)}) & SL locked at BREAKEVEN PLUS (${trade['sl_price']:.4f})!")
@@ -467,6 +631,34 @@ class DeltaClient:
                     r_dist = abs(entry_price - trade["initial_sl"])
                     trade["sl_price"] = entry_price + (1.0 * r_dist) if side == "LONG" else entry_price - (1.0 * r_dist)
 
+                    # Real Money Partial Exit on Delta Exchange India
+                    prod_id = trade.get("product_id") or self.product_ids.get(symbol)
+                    if not self.paper_mode and prod_id and exit_contracts > 0:
+                        close_side = "sell" if side == "LONG" else "buy"
+                        self._api_request("POST", "/v2/orders", payload_dict={
+                            "product_id": int(prod_id),
+                            "product_symbol": symbol,
+                            "size": int(exit_contracts),
+                            "side": close_side,
+                            "order_type": "market_order",
+                            "reduce_only": True
+                        })
+                        self.cancel_product_orders(prod_id)
+                        rem_c = trade.get("remaining_contracts", total_c)
+                        if rem_c > 0:
+                            trail_sl_str = round_to_tick(trade["sl_price"], self.tick_sizes.get(symbol, "0.01"))
+                            self._api_request("POST", "/v2/orders", payload_dict={
+                                "product_id": int(prod_id),
+                                "product_symbol": symbol,
+                                "size": int(rem_c),
+                                "side": close_side,
+                                "order_type": "market_order",
+                                "stop_order_type": "stop_loss_order",
+                                "stop_price": trail_sl_str,
+                                "stop_trigger_method": "mark_price",
+                                "reduce_only": True
+                            })
+
                     self._apply_realized_pnl_inr(pnl_tp1_inr)
                     self.save_state()
                     telegram_notifier.notify_tp1_hit(trade, pnl_tp1_inr, trade["sl_price"])
@@ -487,6 +679,20 @@ class DeltaClient:
                 trade["remaining_ratio"] = 0.0
                 total_trade_pnl_inr = trade["realized_pnl_inr"] + pnl_tp2_inr
                 self._apply_realized_pnl_inr(pnl_tp2_inr)
+
+                prod_id = trade.get("product_id") or self.product_ids.get(symbol)
+                if not self.paper_mode and prod_id:
+                    self.cancel_product_orders(prod_id)
+                    if rem_c > 0:
+                        close_side = "sell" if side == "LONG" else "buy"
+                        self._api_request("POST", "/v2/orders", payload_dict={
+                            "product_id": int(prod_id),
+                            "product_symbol": symbol,
+                            "size": int(rem_c),
+                            "side": close_side,
+                            "order_type": "market_order",
+                            "reduce_only": True
+                        })
 
                 telegram_notifier.notify_tp2_hit(trade, total_trade_pnl_inr)
                 symbols_to_close.append((symbol, "TARGET_2_FULL_WIN", total_trade_pnl_inr, current_price))
@@ -515,6 +721,20 @@ class DeltaClient:
                     loss_dist_pct = abs(sl_price - entry_price) / entry_price
                     remaining_pnl_inr = -(remaining_val_inr * loss_dist_pct)
                     reason = "STOP_LOSS_EXIT"
+
+                prod_id = trade.get("product_id") or self.product_ids.get(symbol)
+                if not self.paper_mode and prod_id:
+                    self.cancel_product_orders(prod_id)
+                    if rem_c > 0:
+                        close_side = "sell" if side == "LONG" else "buy"
+                        self._api_request("POST", "/v2/orders", payload_dict={
+                            "product_id": int(prod_id),
+                            "product_symbol": symbol,
+                            "size": int(rem_c),
+                            "side": close_side,
+                            "order_type": "market_order",
+                            "reduce_only": True
+                        })
 
                 trade["remaining_contracts"] = 0
                 trade["remaining_ratio"] = 0.0
